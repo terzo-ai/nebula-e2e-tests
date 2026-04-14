@@ -5,12 +5,37 @@ metadata:
   namespace: terzo-squad
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 86400  # auto-delete job after 24h
+  ttlSecondsAfterFinished: 86400
   template:
     metadata:
       labels:
         app: nebula-e2e-tests
+      annotations:
+        admission.datadoghq.com/enabled: "false"
     spec:
+      # Init container fetches token using curl (Datadog doesn't interfere with init containers)
+      initContainers:
+      - name: fetch-token
+        image: curlimages/curl
+        command:
+        - /bin/sh
+        - -c
+        - |
+          TOKEN=$(curl -s --connect-timeout 10 \
+            -X POST "http://auth-service-dev1.product-internal.terzocloud.com/auth/token" \
+            -H "Content-Type: application/json" \
+            -H "X-Access-Token: e9c4455dc79d417b986d0386eb7b3d25" \
+            -d '{"userId":1001359,"email":"shankar@terzocloud.com","tenantId":1000012,"grantType":"session_token"}' \
+            | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          if [ -z "$TOKEN" ]; then
+            echo "FAILED: could not fetch token"
+            exit 1
+          fi
+          echo "$TOKEN" > /shared/access-token
+          echo "Token fetched successfully (${#TOKEN} chars)"
+        volumeMounts:
+        - name: shared
+          mountPath: /shared
       containers:
       - name: e2e
         image: python:3.14-slim
@@ -19,23 +44,21 @@ spec:
         - -c
         - |
           set -e
-          echo "=== Setup ==="
-          apt-get update -qq && apt-get install -y -qq git curl > /dev/null
-          pip install uv --quiet
+          export E2E_ACCESS_TOKEN=$(cat /shared/access-token)
+          echo "=== Token loaded (${#E2E_ACCESS_TOKEN} chars) ==="
 
-          echo "=== Auth service connectivity ==="
-          for host in auth-service-dev1 auth-service-dev2 auth-service-dev3; do
-            url="http://${host}.product-internal.terzocloud.com/auth/token"
-            code=$(curl -s --connect-timeout 5 -o /tmp/auth-resp.txt -w "%{http_code}" \
-              -X POST "$url" \
-              -H "Content-Type: application/json" \
-              -H "X-Access-Token: 9a264959-4f45-43a2-aaa2-ea30c9817af4" \
-              -d '{"userId":1001359,"email":"shankar@terzocloud.com","tenantId":1000012,"grantType":"session_token"}' 2>/dev/null || echo "000")
-            echo "$host → HTTP $code"
-            if [ "$code" != "000" ]; then
-              echo "Response: $(cat /tmp/auth-resp.txt | head -c 200)"
-            fi
-          done
+          echo "=== Testing token against mafia ==="
+          apt-get update -qq && apt-get install -y -qq git curl > /dev/null
+
+          echo "--- access-token header ---"
+          curl -s -w "\nHTTP %{http_code}\n" \
+            -H "X-Tenant-Id: 1000012" \
+            -H "access-token: $E2E_ACCESS_TOKEN" \
+            "https://mafia.terzocloud.com/api/v1/documents?size=1" || true
+
+          echo "=== Setup ==="
+          apt-get update -qq && apt-get install -y -qq git > /dev/null
+          pip install uv --quiet
 
           echo "=== Cloning repo ==="
           git clone https://github.com/terzo-ai/nebula-e2e-tests.git /app
@@ -55,21 +78,11 @@ spec:
           value: "https://mafia.terzocloud.com"
         - name: E2E_TENANT_ID
           value: "1000012"
-        - name: E2E_AUTH_SERVICE_URL
-          value: "http://auth-service-dev1.product-internal.terzocloud.com"
-        - name: E2E_AUTH_SERVICE_KEY
-          value: "e9c4455dc79d417b986d0386eb7b3d25"
-        # Fixtures from Azure File Share (optional — falls back to in-memory)
-        # - name: E2E_FIXTURES_DIR
-        #   value: "/mnt/e2e-fixtures"
-        # volumeMounts:
-        # - name: test-fixtures
-        #   mountPath: /mnt/e2e-fixtures
-        #   readOnly: true
-      # volumes:
-      # - name: test-fixtures
-      #   azureFile:
-      #     shareName: fs-terzo-ai-dev
-      #     secretName: azure-storage-secret
-      #     readOnly: true
+        volumeMounts:
+        - name: shared
+          mountPath: /shared
+          readOnly: true
+      volumes:
+      - name: shared
+        emptyDir: {}
       restartPolicy: Never

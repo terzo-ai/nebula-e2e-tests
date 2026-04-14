@@ -28,7 +28,7 @@ spec:
         - name: E2E_TENANT_ID
           value: "1000012"
         - name: E2E_AUTH_SERVICE_URL
-          value: "http://auth-service-dev1.product-internal.terzocloud.com"
+          value: "http://auth-service-mwc1.product-internal.terzocloud.com"
         - name: E2E_AUTH_SERVICE_KEY
           value: "e9c4455dc79d417b986d0386eb7b3d25"
       restartPolicy: Never

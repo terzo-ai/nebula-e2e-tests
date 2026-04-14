@@ -9,7 +9,7 @@ class E2EConfig(BaseSettings):
     tenant_id: int = 1000012
 
     # Auth service — auto-fetches access token (reachable from Dev cluster)
-    auth_service_url: str = "https://auth-service-dev.product-internal.terzocloud.com"
+    auth_service_url: str = "http://auth-service-dev1.product-internal.terzocloud.com"
     auth_service_key: str = "9a264959-4f45-43a2-aaa2-ea30c9817af4"
     auth_user_id: int = 1001359
     auth_email: str = "shankar@terzocloud.com"

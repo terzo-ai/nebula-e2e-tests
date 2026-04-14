@@ -19,11 +19,11 @@ spec:
         - -c
         - |
           set -e
-          echo "=== Installing uv ==="
+          echo "=== Setup ==="
+          apt-get update -qq && apt-get install -y -qq git > /dev/null
           pip install uv --quiet
 
           echo "=== Cloning repo ==="
-          apt-get update -qq && apt-get install -y -qq git > /dev/null
           git clone https://github.com/terzo-ai/nebula-e2e-tests.git /app
           cd /app
 
@@ -32,7 +32,7 @@ spec:
 
           echo "=== Run ID: $(date -u +%Y%m%d-%H%M%S) ==="
           echo "=== Running smoke tests ==="
-          uv run pytest tests/api/test_smoke.py -v
+          uv run pytest tests/api/test_smoke.py -v || true
 
           echo "=== Running pipeline tests ==="
           uv run pytest tests/api/ -v --timeout=900
@@ -41,6 +41,8 @@ spec:
           value: "https://mafia.terzocloud.com"
         - name: E2E_TENANT_ID
           value: "1000012"
+        - name: E2E_AUTH_SERVICE_URL
+          value: "http://auth-service-dev1.product-internal.terzocloud.com"
         # Fixtures from Azure File Share (optional — falls back to in-memory)
         # - name: E2E_FIXTURES_DIR
         #   value: "/mnt/e2e-fixtures"

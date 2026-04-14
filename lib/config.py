@@ -35,3 +35,12 @@ class E2EConfig(BaseSettings):
     poll_interval: float = 2.0
     poll_backoff: float = 1.5
     poll_max_interval: float = 15.0
+
+    # Event Hub (optional — when set, tests capture pipeline events)
+    event_hub_connection_string: str = ""
+    event_hub_name: str = ""
+    event_hub_consumer_group: str = "probe-test"
+    event_hub_listen_timeout: float = 120.0
+
+    # Pipeline report
+    report_output_dir: str = "reports"

@@ -6,3 +6,4 @@ allure-results/
 .pytest_cache/
 *.egg-info/
 dist/
+reports/

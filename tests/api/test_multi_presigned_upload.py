@@ -4,15 +4,22 @@ Uploads all test files from the configured source (Azure Blob / local dir / in-m
 If fewer test files than file_count, the first file is reused with different names.
 """
 
+from __future__ import annotations
+
 import asyncio
+from typing import TYPE_CHECKING
 
 import pytest
 
 from lib.api_clients.document_service import DocumentServiceClient
 from lib.config import E2EConfig
 from lib.fixtures import FixtureFile
-from lib.polling import poll_until
+from lib.polling import PollTimeoutError, poll_until
+from lib.report import PipelineReport, StepStatus
 from lib.run_context import RunContext
+
+if TYPE_CHECKING:
+    from lib.event_hub import EventHubListener
 
 
 async def _upload_single_file(
@@ -38,6 +45,8 @@ async def test_multi_presigned_upload_all_reach_extraction_queued(
     config: E2EConfig,
     test_files: list[FixtureFile],
     run_ctx: RunContext,
+    event_listener: EventHubListener | None,
+    pipeline_report: PipelineReport,
     file_count: int,
 ) -> None:
     """Upload N files concurrently via presigned SAS URLs and verify all
@@ -64,25 +73,68 @@ async def test_multi_presigned_upload_all_reach_extraction_queued(
         run_ctx.register(ufid)
     assert len(ufids) == file_count
 
-    # Step 2: Poll all documents until EXTRACTION_QUEUED (concurrently)
-    async with asyncio.TaskGroup() as tg:
-        poll_tasks = [
-            tg.create_task(
-                poll_until(
-                    lambda ufid=ufid: doc_client.get_document(ufid),
-                    lambda d: d.processing_state == "EXTRACTION_QUEUED",
-                    timeout=config.full_pipeline_timeout,
-                    interval=config.poll_interval,
-                    backoff=config.poll_backoff,
-                    max_interval=config.poll_max_interval,
-                    description=f"EXTRACTION_QUEUED for {ufid}",
-                )
-            )
-            for ufid in ufids
-        ]
-    results = [t.result() for t in poll_tasks]
+    # Register documents in report and event listener
+    for i, ufid in enumerate(ufids):
+        test_file = test_files[i % len(test_files)]
+        filename = run_ctx.tag_filename(test_file.name, index=i)
+        pipeline_report.add_document(ufid, filename)
+        pipeline_report.record_step(
+            ufid, "Document Service",
+            "Upload + Confirm",
+            StepStatus.PASS,
+            details="Presigned upload \u2192 Confirmed \u2713",
+        )
+        if event_listener:
+            event_listener.watch(ufid)
 
-    # Step 3: Verify all reached EXTRACTION_QUEUED
+    # Step 2: Poll all documents until EXTRACTION_QUEUED (concurrently)
+    results: list = []
+    failed_ufids: list[str] = []
+    try:
+        async with asyncio.TaskGroup() as tg:
+            poll_tasks = [
+                tg.create_task(
+                    poll_until(
+                        lambda ufid=ufid: doc_client.get_document(ufid),
+                        lambda d: d.processing_state == "EXTRACTION_QUEUED",
+                        timeout=config.full_pipeline_timeout,
+                        interval=config.poll_interval,
+                        backoff=config.poll_backoff,
+                        max_interval=config.poll_max_interval,
+                        description=f"EXTRACTION_QUEUED for {ufid}",
+                    )
+                )
+                for ufid in ufids
+            ]
+        results = [t.result() for t in poll_tasks]
+    except* PollTimeoutError as eg:
+        for exc in eg.exceptions:
+            if isinstance(exc, PollTimeoutError):
+                # Extract ufid from the description
+                desc = exc.description
+                for uid in ufids:
+                    if uid in desc:
+                        failed_ufids.append(uid)
+                        break
+
+    # Step 3: Record results per document
+    for i, ufid in enumerate(ufids):
+        if ufid in failed_ufids:
+            pipeline_report.record_step(
+                ufid, "Pipeline",
+                "Full Pipeline \u2192 EXTRACTION_QUEUED",
+                StepStatus.FAIL,
+                details=f"\u00d7 Timed out waiting for EXTRACTION_QUEUED",
+            )
+        else:
+            pipeline_report.record_step(
+                ufid, "Pipeline",
+                "Full Pipeline \u2192 EXTRACTION_QUEUED",
+                StepStatus.PASS,
+                details="OCR + Extraction pipeline complete \u2713",
+            )
+
+    # Step 3 (original): Verify all reached EXTRACTION_QUEUED
     for doc in results:
         assert doc.processing_state == "EXTRACTION_QUEUED", (
             f"Document {doc.ufid} stuck at {doc.processing_state}"
@@ -92,6 +144,25 @@ async def test_multi_presigned_upload_all_reach_extraction_queued(
     for ufid in ufids:
         artifacts = await doc_client.get_artifacts(ufid)
         ocr_artifacts = [a for a in artifacts.artifacts if a.type == "OCR_PDF"]
+        if ocr_artifacts:
+            pipeline_report.record_step(
+                ufid, "OCR Service",
+                "OCR Artifact Verification",
+                StepStatus.PASS,
+                details=f"OCR_PDF artifact found \u2713",
+            )
+        else:
+            pipeline_report.record_step(
+                ufid, "OCR Service",
+                "OCR Artifact Verification",
+                StepStatus.FAIL,
+                details=f"\u00d7 No OCR_PDF artifact found",
+            )
         assert len(ocr_artifacts) > 0, f"No OCR_PDF artifact for {ufid}"
+
+    # Event Hub verification (optional)
+    if event_listener:
+        dupes = event_listener.find_duplicates()
+        assert not dupes, f"Duplicate events detected: {dupes}"
 
     # Documents kept for post-run inspection. Run cleanup.py to delete.

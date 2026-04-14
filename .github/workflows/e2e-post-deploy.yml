@@ -25,6 +25,8 @@ jobs:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}
           E2E_DRIVE_PASSWORD: ${{ secrets.E2E_DRIVE_PASSWORD }}
+          E2E_EVENT_HUB_CONNECTION_STRING: ${{ secrets.E2E_EVENT_HUB_CONNECTION_STRING }}
+          E2E_EVENT_HUB_NAME: ${{ vars.E2E_EVENT_HUB_NAME }}
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -32,3 +34,10 @@ jobs:
         with:
           name: allure-results
           path: allure-results/
+
+      - name: Upload pipeline report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pipeline-report
+          path: reports/

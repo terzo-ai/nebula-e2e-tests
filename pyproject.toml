@@ -10,6 +10,7 @@ dependencies = [
     "pytest-timeout>=2.3",
     "pydantic-settings>=2.7",
     "allure-pytest>=2.13",
+    "azure-eventhub>=5.11",
 ]
 
 [project.optional-dependencies]

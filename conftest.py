@@ -1,9 +1,13 @@
+import pathlib
+from datetime import datetime, timezone
+
 import pytest
 
 from lib.api_clients.document_service import DocumentServiceClient
 from lib.auth import fetch_access_token
 from lib.config import E2EConfig
 from lib.fixtures import FixtureFile, load_test_files
+from lib.report import PipelineReport
 from lib.run_context import RunContext
 
 
@@ -47,6 +51,44 @@ def test_files(config: E2EConfig) -> list[FixtureFile]:
 def sample_pdf(test_files: list[FixtureFile]) -> bytes:
     """First test file's content — for single-file tests."""
     return test_files[0].content
+
+
+@pytest.fixture(scope="session")
+async def event_listener(config: E2EConfig):
+    """Event Hub listener — captures pipeline events during test execution.
+
+    Yields None if Event Hub is not configured (tests still pass without event data).
+    """
+    if not config.event_hub_connection_string:
+        yield None
+        return
+
+    from lib.event_hub import EventHubListener
+
+    async with EventHubListener(
+        connection_string=config.event_hub_connection_string,
+        event_hub_name=config.event_hub_name,
+        consumer_group=config.event_hub_consumer_group,
+        timeout=config.event_hub_listen_timeout,
+    ) as listener:
+        yield listener
+
+
+@pytest.fixture(scope="session")
+def pipeline_report(config: E2EConfig, run_ctx: RunContext):
+    """Collects pipeline step results across all tests, generates HTML report at teardown."""
+    report = PipelineReport(
+        run_id=run_ctx.run_id,
+        environment=config.base_url,
+        tenant_id=config.tenant_id,
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    yield report
+
+    report.finalize()
+    output_dir = pathlib.Path(config.report_output_dir)
+    path = report.save(output_dir / f"pipeline-{run_ctx.run_id}.html")
+    print(f"\n  Pipeline report: {path}")
 
 
 @pytest.fixture

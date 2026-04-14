@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: nebula-e2e-cleanup
-  namespace: nebula
+  namespace: terzo-squad
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600

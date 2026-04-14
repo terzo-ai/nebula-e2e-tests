@@ -17,18 +17,22 @@ def config() -> E2EConfig:
 
 
 @pytest.fixture(scope="session")
-async def access_token(config: E2EConfig) -> str:
+async def access_token(config: E2EConfig, pipeline_report: PipelineReport) -> str:
     """Get access token: manual override or auto-fetch from auth service."""
     if config.access_token:
         return config.access_token
     try:
         return await fetch_access_token(config)
     except Exception as e:
-        pytest.fail(
+        msg = (
             f"Could not fetch access token from auth service: {e}\n"
             f"Auth service at {config.auth_service_url} is not reachable.\n"
             f"Run from the Dev cluster where the auth service is accessible."
         )
+        pipeline_report.record_error(
+            f"Auth failure: {e} — auth service at {config.auth_service_url} is not reachable"
+        )
+        pytest.fail(msg)
 
 
 @pytest.fixture(scope="session")

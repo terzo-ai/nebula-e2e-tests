@@ -88,6 +88,7 @@ class PipelineReport:
         self.ended_at: str | None = None
         self.documents: list[DocumentTrace] = []
         self._step_counter: dict[str, int] = {}
+        self.errors: list[str] = []
 
     def add_document(self, ufid: str, filename: str) -> DocumentTrace:
         trace = DocumentTrace(ufid=ufid, filename=filename)
@@ -121,6 +122,10 @@ class PipelineReport:
         )
         trace.steps.append(step)
         return step
+
+    def record_error(self, message: str) -> None:
+        """Record a session-level error (e.g., auth failure, config issue)."""
+        self.errors.append(message)
 
     def finalize(self) -> None:
         self.ended_at = datetime.now(timezone.utc).isoformat()
@@ -290,6 +295,29 @@ def _render_html(report: PipelineReport) -> str:
     passed = sum(1 for d in report.documents if d.overall_status == StepStatus.PASS)
     failed = sum(1 for d in report.documents if d.overall_status == StepStatus.FAIL)
 
+    # Errors section
+    errors_section = ""
+    if report.errors:
+        error_items = "\n".join(
+            f'<div class="error-item">{e}</div>' for e in report.errors
+        )
+        errors_section = f"""
+    <div class="errors-banner">
+      <h3>Errors</h3>
+      {error_items}
+    </div>"""
+
+    # Empty state
+    empty_state = ""
+    if not report.documents and not report.errors:
+        empty_state = """
+    <div class="empty-state">
+      <div class="empty-icon">&#9888;</div>
+      <div class="empty-title">No pipeline data recorded</div>
+      <div class="empty-desc">Tests may have been skipped or errored before pipeline steps ran.
+      Check the pytest output for details.</div>
+    </div>"""
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -392,6 +420,22 @@ def _render_html(report: PipelineReport) -> str:
     border-bottom: 1px solid var(--border);
   }}
   .events-table td {{ padding: 6px 10px; border-bottom: 1px solid var(--border); }}
+  .errors-banner {{
+    background: var(--fail-bg); border: 1px solid var(--fail);
+    border-radius: 8px; padding: 16px 20px; margin-bottom: 24px;
+  }}
+  .errors-banner h3 {{ font-size: 14px; color: var(--fail); margin-bottom: 8px; }}
+  .error-item {{
+    font-size: 13px; color: #991b1b; padding: 6px 0;
+    border-bottom: 1px solid #fecaca; font-family: 'SF Mono', Consolas, monospace;
+  }}
+  .error-item:last-child {{ border-bottom: none; }}
+  .empty-state {{
+    text-align: center; padding: 60px 20px; color: var(--gray);
+  }}
+  .empty-icon {{ font-size: 48px; margin-bottom: 12px; }}
+  .empty-title {{ font-size: 18px; font-weight: 600; color: #374151; margin-bottom: 8px; }}
+  .empty-desc {{ font-size: 14px; max-width: 500px; margin: 0 auto; }}
   .footer {{
     text-align: center; padding: 24px; font-size: 12px; color: var(--gray);
   }}
@@ -436,6 +480,9 @@ def _render_html(report: PipelineReport) -> str:
         <div class="lbl">Failed</div>
       </div>
     </div>
+
+    {errors_section}
+    {empty_state}
 
     <h2 style="font-size:18px;margin-bottom:16px;">Pipeline Progression</h2>
 

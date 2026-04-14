@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nebula-e2e-tests
+  namespace: nebula
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400  # auto-delete job after 24h
+  template:
+    metadata:
+      labels:
+        app: nebula-e2e-tests
+    spec:
+      containers:
+      - name: e2e
+        image: python:3.14-slim
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "=== Installing uv ==="
+          pip install uv --quiet
+
+          echo "=== Cloning repo ==="
+          apt-get update -qq && apt-get install -y -qq git > /dev/null
+          git clone https://github.com/terzo-ai/nebula-e2e-tests.git /app
+          cd /app
+
+          echo "=== Installing dependencies ==="
+          uv sync
+
+          echo "=== Run ID: $(date -u +%Y%m%d-%H%M%S) ==="
+          echo "=== Running smoke tests ==="
+          uv run pytest tests/api/test_smoke.py -v
+
+          echo "=== Running pipeline tests ==="
+          uv run pytest tests/api/ -v --timeout=900
+        env:
+        - name: E2E_BASE_URL
+          value: "https://mafia.terzocloud.com"
+        - name: E2E_TENANT_ID
+          value: "1000012"
+        # Fixtures from Azure File Share (optional — falls back to in-memory)
+        # - name: E2E_FIXTURES_DIR
+        #   value: "/mnt/e2e-fixtures"
+        # volumeMounts:
+        # - name: test-fixtures
+        #   mountPath: /mnt/e2e-fixtures
+        #   readOnly: true
+      # volumes:
+      # - name: test-fixtures
+      #   azureFile:
+      #     shareName: fs-terzo-ai-dev
+      #     secretName: azure-storage-secret
+      #     readOnly: true
+      restartPolicy: Never

@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nebula-e2e-cleanup
+  namespace: nebula
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      containers:
+      - name: cleanup
+        image: python:3.14-slim
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          pip install uv --quiet
+          apt-get update -qq && apt-get install -y -qq git > /dev/null
+          git clone https://github.com/terzo-ai/nebula-e2e-tests.git /app
+          cd /app
+          uv sync
+          uv run python cleanup.py
+        env:
+        - name: E2E_BASE_URL
+          value: "https://mafia.terzocloud.com"
+        - name: E2E_TENANT_ID
+          value: "1000012"
+      restartPolicy: Never

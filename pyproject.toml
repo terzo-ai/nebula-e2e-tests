@@ -1,0 +1,30 @@
+[project]
+name = "e2e-tests"
+version = "0.1.0"
+description = "E2E tests for the document processing pipeline (Upload → OCR → Extraction)"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "pytest-timeout>=2.3",
+    "pydantic-settings>=2.7",
+    "allure-pytest>=2.13",
+]
+
+[project.optional-dependencies]
+ui = [
+    "playwright>=1.49",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+timeout = 900
+markers = [
+    "slow: marks tests that take >60s (OCR processing)",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.9",
+]

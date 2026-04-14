@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+allure-results/
+.pytest_cache/
+*.egg-info/
+dist/

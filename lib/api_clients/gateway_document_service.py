@@ -43,15 +43,21 @@ class BulkUploadResponse:
 
     The exact response shape isn't locked down yet — `ufids` is extracted
     defensively from common JSON paths. `raw` always contains the full
-    decoded body for fallback inspection.
+    decoded body for fallback inspection. `status_code` is the HTTP status
+    returned by the gateway (expected: 202 Accepted).
     """
 
     ufids: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    status_code: int = 0
 
     @classmethod
-    def from_json(cls, data: Any) -> "BulkUploadResponse":
-        return cls(ufids=_extract_ufids(data), raw=data if isinstance(data, dict) else {"_raw": data})
+    def from_json(cls, data: Any, status_code: int = 0) -> "BulkUploadResponse":
+        return cls(
+            ufids=_extract_ufids(data),
+            raw=data if isinstance(data, dict) else {"_raw": data},
+            status_code=status_code,
+        )
 
 
 def _extract_ufids(data: Any) -> list[str]:
@@ -176,9 +182,10 @@ class GatewayDocumentServiceClient:
                 f"  response headers: {debug_headers}\n"
                 f"  response body: {body_snippet}"
             )
-        parsed = BulkUploadResponse.from_json(resp.json())
+        parsed = BulkUploadResponse.from_json(resp.json(), status_code=resp.status_code)
         logger.info(
-            "bulk-upload parsed: accepted=%s rejected=%s totalItems=%s ufids=%s",
+            "bulk-upload parsed: status=%s accepted=%s rejected=%s totalItems=%s ufids=%s",
+            parsed.status_code,
             parsed.raw.get("accepted"),
             parsed.raw.get("rejected"),
             parsed.raw.get("totalItems"),

@@ -291,32 +291,61 @@ class EventHubListener:
     # How often wait_for_event emits a "still waiting" heartbeat line.
     WAIT_HEARTBEAT_SECONDS: float = 15.0
 
+    async def wait_for_any_event(
+        self,
+        ufid: str,
+        timeout: float | None = None,
+    ) -> CapturedEvent:
+        """Block until ANY event for a ufid arrives, or timeout.
+
+        Used to confirm the Event Hub listener is actively receiving events
+        for the watched document — the first event (typically
+        `com.terzo.document.uploaded`) is enough to prove the listener is
+        wired up and the producer is emitting. The per-stage timeout resets
+        on each call.
+        """
+        # Sentinel event_type "" signals "match first event for this ufid".
+        return await self.wait_for_event(ufid, event_type="", timeout=timeout)
+
     async def wait_for_event(
         self,
         ufid: str,
         event_type: str,
         timeout: float | None = None,
     ) -> CapturedEvent:
-        """Block until a specific event arrives or timeout."""
+        """Block until a specific event arrives or timeout.
+
+        If ``event_type`` is an empty string, the first event captured for
+        ``ufid`` (regardless of type) satisfies the wait. See
+        :meth:`wait_for_any_event`.
+        """
         timeout = timeout or self._timeout
         deadline = time.monotonic() + timeout
         hubs = ",".join(self._event_hub_names)
+        type_label = event_type or "<any>"
         logger.info(
             "Waiting for event: type=%s ufid=%s timeout=%.1fs "
             "(hubs=%s group=%s partitions=%s total_events=%d per_partition=%s)",
-            event_type, ufid, timeout,
+            type_label, ufid, timeout,
             hubs, self._consumer_group, ",".join(self._partition_ids),
             self._total_events_received, self._events_per_partition,
         )
         last_heartbeat = time.monotonic()
 
+        def _matches(event: CapturedEvent) -> bool:
+            if event.document_id != ufid:
+                return False
+            # Empty event_type means "first event for this ufid wins".
+            return not event_type or event.event_type == event_type
+
         while True:
             for event in self._events:
-                if event.document_id == ufid and event.event_type == event_type:
+                if _matches(event):
                     logger.info(
-                        "Resolved event: type=%s ufid=%s hub=%s partition=%s seq=%d",
-                        event_type, ufid, hubs, event.partition_id,
-                        event.sequence_number,
+                        "Resolved event: type=%s ufid=%s actual_type=%s "
+                        "hub=%s partition=%s seq=%d",
+                        type_label, ufid, event.event_type, hubs,
+                        event.partition_id, event.sequence_number,
                     )
                     return event
 
@@ -326,12 +355,12 @@ class EventHubListener:
                     "Timed out waiting for event: type=%s ufid=%s after %.1fs "
                     "(hubs=%s group=%s total_events=%d per_partition=%s "
                     "captured_for_ufid=%d)",
-                    event_type, ufid, timeout,
+                    type_label, ufid, timeout,
                     hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
                     len(self.events_for(ufid)),
                 )
-                raise EventTimeoutError(ufid, event_type, timeout)
+                raise EventTimeoutError(ufid, event_type or "<any>", timeout)
 
             # Periodic heartbeat so a long wait is observable in logs rather
             # than appearing hung.
@@ -341,7 +370,7 @@ class EventHubListener:
                     "Still waiting: type=%s ufid=%s elapsed=%.0fs remaining=%.0fs "
                     "(hubs=%s group=%s total_events=%d per_partition=%s "
                     "captured_for_ufid=%d)",
-                    event_type, ufid, timeout - remaining, remaining,
+                    type_label, ufid, timeout - remaining, remaining,
                     hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
                     len(self.events_for(ufid)),

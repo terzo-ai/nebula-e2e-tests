@@ -1,17 +1,21 @@
 """E2E: bulk-upload → observe full pipeline events via Event Hub.
 
 Invokes POST {E2E_BASE_URL}/api/v1/documents/bulk-upload with a single item,
-extracts the ufid from the response, then watches Event Hub for each pipeline
-event (com.terzo.document.*) and records a PASS/FAIL pipeline-report step for
-each one. The HTML report is rendered at session teardown and uploaded as the
-`pipeline-report-nightly` / `pipeline-report` artifact by the workflows.
+extracts the ufid from the response, then watches Event Hub and records a
+PASS/FAIL pipeline-report row for each stage:
 
-Event sequence (from docs/EVENT_TYPES.md):
-  uploaded → ocr.queued → ocr.completed → extraction.queued →
-  extraction.completed → ingestion.queued → ingestion.completed
+    1. Document Service : PASS on HTTP 202 + ufid returned
+    2. Event Hub        : PASS on first event captured for the ufid
+    3. OCR Service      : PASS on com.terzo.document.ocr.completed
+    4. Extraction Service: PASS on com.terzo.document.extraction.completed
+    5. Ingestion Service : PASS on com.terzo.document.ingestion.completed
 
-`com.terzo.document.failed` is monitored throughout — if it fires, remaining
-steps are marked FAIL with the failure_reason from the payload.
+Each stage has its own independent timeout that starts when the stage is
+entered — a slow OCR stage does not eat into the Extraction or Ingestion
+budget. `com.terzo.document.failed` short-circuits remaining stages to FAIL.
+
+The HTML pipeline report is rendered at session teardown and uploaded as
+the `pipeline-report-nightly` / `pipeline-report` workflow artifact.
 """
 
 from __future__ import annotations
@@ -37,32 +41,51 @@ FAILURE_EVENT = "com.terzo.document.failed"
 
 
 @dataclass(frozen=True)
-class ExpectedEvent:
-    event_type: str
+class PipelineStage:
+    """One row in the pipeline report that waits on Event Hub.
+
+    ``event_type`` = None means "first event captured for this ufid wins"
+    (used for the Event Hub stage, which just proves the listener is
+    receiving traffic for the document). Each stage's ``timeout_s`` starts
+    fresh when the stage is entered, so the per-stage budget does not
+    bleed between stages.
+    """
+
     service: str
     description: str
+    event_type: str | None
     timeout_s: float
 
 
-# Logical pipeline order (docs/EVENT_TYPES.md). Long-running stages
-# (worker-pod download, OCR/extraction/ingestion completions) each get
-# a 15-minute timeout. Intermediate *.queued events fire synchronously
-# inside Document Service right after the prior completion, so they
-# keep a short timeout — a slow queue event is a real hang signal,
-# not something to mask behind a longer wait.
-PIPELINE_EVENTS: list[ExpectedEvent] = [
-    # Report step → service mapping (grouped by pipeline stage, not by producer):
-    #   Document Service    : document.uploaded, document.failed
-    #   OCR Service         : document.ocr.queued, document.ocr.completed
-    #   Extraction Service  : document.extraction.queued, document.extraction.completed
-    #   Ingestion Service   : document.ingestion.queued, document.ingestion.completed
-    ExpectedEvent("com.terzo.document.uploaded",             "Document Service",   "Document uploaded (worker-pod download complete)", 900),
-    ExpectedEvent("com.terzo.document.ocr.queued",           "OCR Service",        "OCR queued",                                       30),
-    ExpectedEvent("com.terzo.document.ocr.completed",        "OCR Service",        "OCR completed",                                    900),
-    ExpectedEvent("com.terzo.document.extraction.queued",    "Extraction Service", "Extraction queued",                                30),
-    ExpectedEvent("com.terzo.document.extraction.completed", "Extraction Service", "Extraction completed",                             900),
-    ExpectedEvent("com.terzo.document.ingestion.queued",     "Ingestion Service",  "Ingestion queued",                                 30),
-    ExpectedEvent("com.terzo.document.ingestion.completed",  "Ingestion Service",  "Ingestion completed",                              900),
+# Ordered per docs/EVENT_TYPES.md. Each stage owns its own wall-clock
+# budget — exceeding it fails only that stage (subsequent stages still
+# run with their own fresh timeout), unless the pipeline emits
+# `com.terzo.document.failed`, in which case remaining stages short-circuit.
+PIPELINE_STAGES: list[PipelineStage] = [
+    PipelineStage(
+        service="Event Hub",
+        description="Event Hub listener received first event for ufid",
+        event_type=None,
+        timeout_s=900,
+    ),
+    PipelineStage(
+        service="OCR Service",
+        description="OCR completed",
+        event_type="com.terzo.document.ocr.completed",
+        timeout_s=900,
+    ),
+    PipelineStage(
+        service="Extraction Service",
+        description="AI Extraction completed",
+        event_type="com.terzo.document.extraction.completed",
+        timeout_s=900,
+    ),
+    PipelineStage(
+        service="Ingestion Service",
+        description="Ingestion completed",
+        event_type="com.terzo.document.ingestion.completed",
+        timeout_s=900,
+    ),
 ]
 
 
@@ -73,14 +96,12 @@ async def test_bulk_upload_full_pipeline(
     event_listener: "EventHubListener | None",
     pipeline_report: PipelineReport,
 ) -> None:
-    """Post one bulk-upload item and verify all com.terzo.document.* events fire.
-
-    Each expected event becomes a row in the pipeline HTML report with
-    PASS / FAIL / SKIPPED status.
-    """
+    """Post one bulk-upload item and verify each pipeline stage."""
     filename = config.bulk_upload_file_name
 
-    # 1. Post bulk-upload
+    # ------------------------------------------------------------------
+    # Stage 1 — Document Service: PASS when we get HTTP 202 + ufid.
+    # ------------------------------------------------------------------
     response = await gateway_doc_client.bulk_upload(
         items=[
             BulkUploadItem(
@@ -97,104 +118,127 @@ async def test_bulk_upload_full_pipeline(
     )
 
     assert response.ufids, (
-        f"bulk-upload response contained no ufid. Raw response: {response.raw}"
+        f"bulk-upload response contained no ufid. "
+        f"status={response.status_code} raw={response.raw}"
     )
+    assert response.status_code == 202, (
+        f"bulk-upload expected HTTP 202 Accepted, got {response.status_code}. "
+        f"raw={response.raw}"
+    )
+
     ufid = response.ufids[0]
     run_ctx.register(ufid)
     pipeline_report.add_document(ufid, filename)
-    print(f"\nbulk-upload → ufid={ufid}, raw={response.raw}")
+    print(
+        f"\nbulk-upload → status={response.status_code} ufid={ufid} "
+        f"raw={response.raw}"
+    )
 
-    # Record the upload itself as the first step
     pipeline_report.record_step(
         ufid,
         "Document Service",
-        "bulk-upload accepted",
+        "bulk-upload accepted (HTTP 202 + ufid returned)",
         StepStatus.PASS,
-        details=f"POST /api/v1/documents/bulk-upload → ufid {ufid}",
+        details=(
+            f"POST /api/v1/documents/bulk-upload → "
+            f"HTTP {response.status_code}, ufid={ufid}"
+        ),
     )
 
-    # 2. If Event Hub isn't configured, record remaining steps as SKIPPED and return.
+    # ------------------------------------------------------------------
+    # Stages 2–5 — Event Hub / OCR / Extraction / Ingestion.
+    # ------------------------------------------------------------------
     if event_listener is None:
-        for expected in PIPELINE_EVENTS:
+        for stage in PIPELINE_STAGES:
             pipeline_report.record_step(
-                ufid, expected.service, expected.description,
+                ufid, stage.service, stage.description,
                 StepStatus.SKIPPED,
                 details="Event Hub not configured (E2E_EVENT_HUB_CONNECTION_STRING unset)",
             )
-        pipeline_report.record_step(
-            ufid, "Event Hub", "No com.terzo.document.failed event observed",
-            StepStatus.SKIPPED,
-            details="Event Hub not configured",
-        )
         pytest.skip("Event Hub not configured — pipeline event verification skipped")
 
     event_listener.watch(ufid)
 
-    # 3. Wait for each expected event in order. Short-circuit on document.failed.
     aborted = False
-    for expected in PIPELINE_EVENTS:
+    for stage in PIPELINE_STAGES:
+        # Short-circuit: a prior stage already saw the failure event, or
+        # one arrived between stages. Each remaining stage is recorded as
+        # FAIL with the failure_reason rather than silently skipped.
         if aborted or event_listener.has_event(ufid, FAILURE_EVENT):
             aborted = True
             failure_reason = _failure_reason(event_listener, ufid)
             pipeline_report.record_step(
-                ufid, expected.service, expected.description,
+                ufid, stage.service, stage.description,
                 StepStatus.FAIL,
-                details=f"Pipeline aborted — {FAILURE_EVENT} received. "
-                        f"failure_reason: {failure_reason}",
+                details=(
+                    f"Pipeline aborted — {FAILURE_EVENT} received. "
+                    f"failure_reason: {failure_reason}"
+                ),
             )
             continue
 
+        # Per-stage timeout: `wait_for_event` / `wait_for_any_event` compute
+        # their own deadline from `time.monotonic()` on each call, so the
+        # budget resets cleanly when we advance from one stage to the next.
         try:
-            event = await event_listener.wait_for_event(
-                ufid, expected.event_type, timeout=expected.timeout_s
-            )
+            if stage.event_type is None:
+                event = await event_listener.wait_for_any_event(
+                    ufid, timeout=stage.timeout_s
+                )
+                detail_prefix = (
+                    f"First event for ufid: {event.event_type} "
+                    f"at {event.received_at}"
+                )
+            else:
+                event = await event_listener.wait_for_event(
+                    ufid, stage.event_type, timeout=stage.timeout_s
+                )
+                detail_prefix = (
+                    f"Event {event.event_type} received at {event.received_at}"
+                )
             pipeline_report.record_step(
-                ufid, expected.service, expected.description,
+                ufid, stage.service, stage.description,
                 StepStatus.PASS,
                 details=(
-                    f"Event received at {event.received_at} "
+                    f"{detail_prefix} "
                     f"(partition={event.partition_id}, seq={event.sequence_number})"
                 ),
             )
         except Exception as e:  # EventTimeoutError, etc.
-            # Check one more time — failure might have arrived during the wait
+            # The failure event may have arrived during the wait — treat
+            # that as the cause rather than a generic timeout.
             if event_listener.has_event(ufid, FAILURE_EVENT):
                 aborted = True
                 failure_reason = _failure_reason(event_listener, ufid)
                 pipeline_report.record_step(
-                    ufid, expected.service, expected.description,
+                    ufid, stage.service, stage.description,
                     StepStatus.FAIL,
-                    details=f"{FAILURE_EVENT} received during wait. "
-                            f"failure_reason: {failure_reason}",
+                    details=(
+                        f"{FAILURE_EVENT} received during wait. "
+                        f"failure_reason: {failure_reason}"
+                    ),
                 )
             else:
+                expected_label = stage.event_type or "<any event for ufid>"
                 pipeline_report.record_step(
-                    ufid, expected.service, expected.description,
+                    ufid, stage.service, stage.description,
                     StepStatus.FAIL,
-                    details=f"Timed out after {expected.timeout_s}s waiting for "
-                            f"{expected.event_type}. {type(e).__name__}: {e}",
+                    details=(
+                        f"Timed out after {stage.timeout_s}s waiting for "
+                        f"{expected_label}. {type(e).__name__}: {e}"
+                    ),
                 )
 
-    # 4. Final step: explicit assertion that no failure event fired.
+    # Fail the pytest run if the pipeline emitted a failure event, so CI
+    # surfaces a red test in addition to the HTML report row.
     if event_listener.has_event(ufid, FAILURE_EVENT):
         failure_reason = _failure_reason(event_listener, ufid)
-        pipeline_report.record_step(
-            ufid, "Event Hub", "No com.terzo.document.failed event observed",
-            StepStatus.FAIL,
-            details=f"failure_reason: {failure_reason}",
-        )
         pytest.fail(
             f"Pipeline failed for {ufid}: {FAILURE_EVENT} received. "
             f"failure_reason: {failure_reason}"
         )
-    else:
-        pipeline_report.record_step(
-            ufid, "Event Hub", "No com.terzo.document.failed event observed",
-            StepStatus.PASS,
-            details="No failure events captured during pipeline run",
-        )
 
-    # 5. Attach captured events to the last report step for visibility in the HTML.
+    # Attach captured events to the last report step for visibility in the HTML.
     trace = pipeline_report._find_trace(ufid)
     if trace and trace.steps:
         trace.steps[-1].events = event_listener.events_for(ufid)

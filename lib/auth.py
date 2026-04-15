@@ -139,10 +139,12 @@ def _extract_token_from_http_response(resp: httpx.Response, *, step: str) -> str
             if value:
                 return value
 
+    location = resp.headers.get("location", "(none)")
     raise AuthError(
         f"{step}: could not find token in response.\n"
         f"  status: {resp.status_code} {resp.reason_phrase}\n"
         f"  content-type: {resp.headers.get('content-type', '(none)')!r}\n"
+        f"  location: {location!r}\n"
         f"  body (first 1000 chars): {resp.text[:1000]!r}\n"
         f"  response header keys: {sorted(resp.headers.keys())}"
     )

@@ -38,7 +38,7 @@ class E2EConfig(BaseSettings):
     analytics_cookie: str = ""      # via E2E_ANALYTICS_COOKIE secret
 
     # Step 2 — auth-service token exchange (reachable from Dev cluster)
-    auth_service_url: str = "http://auth-service-dev1.product-internal.terzocloud.com"
+    auth_service_url: str = "https://auth-service-dev1.product-internal.terzocloud.com"
     auth_user_id: int = 1000129
     auth_email: str = "paventhan@terzocloud.com"
 

@@ -113,7 +113,7 @@ async def gateway_doc_client(
 ) -> GatewayDocumentServiceClient:
     """Client targeting document-service via the terzoai-gateway (for bulk-upload etc.)."""
     client = GatewayDocumentServiceClient(
-        base_url=config.gateway_base_url,
+        base_url=config.base_url,
         tenant_id=config.tenant_id,
         access_token=access_token,
     )

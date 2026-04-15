@@ -1,4 +1,15 @@
-from dataclasses import dataclass
+"""Gateway-based client for the Nebula document-service.
+
+`base_url` is expected to include the service prefix, e.g.:
+  https://terzoai-gateway-dev.terzocloud.com/nebula/document-service
+
+so requests land at `{base_url}/api/v1/...`. In CI this is driven by
+the E2E_BASE_URL repo variable.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -24,18 +35,61 @@ class BulkUploadItem:
         }
 
 
-class GatewayDocumentServiceClient:
-    """Typed async HTTP client for the Nebula document-service via terzoai-gateway.
+@dataclass
+class BulkUploadResponse:
+    """Parsed response from POST /api/v1/documents/bulk-upload.
 
-    Targets: {gateway_base_url}/nebula/document-service/api/v1/...
-
-    Distinct from `DocumentServiceClient` (which targets mafia.terzocloud.com
-    directly with no service prefix). Used for gateway-native endpoints like
-    bulk-upload that take pre-existing sourceUrls instead of the presigned-SAS
-    + confirm flow.
+    The exact response shape isn't locked down yet — `ufids` is extracted
+    defensively from common JSON paths. `raw` always contains the full
+    decoded body for fallback inspection.
     """
 
-    PATH_PREFIX = "/nebula/document-service/api/v1"
+    ufids: list[str] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, data: Any) -> "BulkUploadResponse":
+        return cls(ufids=_extract_ufids(data), raw=data if isinstance(data, dict) else {"_raw": data})
+
+
+def _extract_ufids(data: Any) -> list[str]:
+    """Find ufid strings in common response shapes.
+
+    Checks (in order):
+      {"ufid": "..."}
+      {"items": [{"ufid": "..."}, ...]}
+      {"documents": [{"ufid": "..."}, ...]}
+      {"data": {...}} recursively
+      Any top-level list of dicts with a ufid key
+    Also accepts `document_id` and `documentId` as aliases.
+    """
+    found: list[str] = []
+    _walk_for_ufids(data, found)
+    # De-dupe while preserving order
+    seen: set[str] = set()
+    return [u for u in found if not (u in seen or seen.add(u))]
+
+
+def _walk_for_ufids(node: Any, out: list[str]) -> None:
+    if isinstance(node, dict):
+        for key in ("ufid", "document_id", "documentId"):
+            v = node.get(key)
+            if isinstance(v, str) and v:
+                out.append(v)
+        for v in node.values():
+            _walk_for_ufids(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _walk_for_ufids(v, out)
+
+
+class GatewayDocumentServiceClient:
+    """Async HTTP client for Nebula document-service (via terzoai-gateway).
+
+    base_url must include the service prefix, e.g.
+    `https://.../nebula/document-service`. All endpoint paths are relative
+    to `{base_url}/api/v1`.
+    """
 
     def __init__(self, base_url: str, tenant_id: int, access_token: str = "") -> None:
         self._base_url = base_url.rstrip("/")
@@ -58,11 +112,13 @@ class GatewayDocumentServiceClient:
         source: str = "BULK_IMPORT",
         truncated: bool = True,
         total_items: int | None = None,
-    ) -> dict[str, Any]:
-        """POST /nebula/document-service/api/v1/documents/bulk-upload.
+    ) -> BulkUploadResponse:
+        """POST {base_url}/api/v1/documents/bulk-upload.
 
         Server pulls each item from its `source_url` — no client-side upload
-        step needed (unlike the singular presigned-upload flow).
+        step needed (unlike the singular presigned-upload flow). Downstream
+        pipeline events (com.terzo.document.*) fire asynchronously and can
+        be observed via the Event Hub listener.
         """
         payload = {
             "source": source,
@@ -70,9 +126,6 @@ class GatewayDocumentServiceClient:
             "_totalItems": total_items if total_items is not None else len(items),
             "items": [item.to_json() for item in items],
         }
-        resp = await self._client.post(
-            f"{self.PATH_PREFIX}/documents/bulk-upload",
-            json=payload,
-        )
+        resp = await self._client.post("/api/v1/documents/bulk-upload", json=payload)
         resp.raise_for_status()
-        return resp.json()
+        return BulkUploadResponse.from_json(resp.json())

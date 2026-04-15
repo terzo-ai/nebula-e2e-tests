@@ -4,14 +4,10 @@ from pydantic_settings import BaseSettings
 class E2EConfig(BaseSettings):
     model_config = {"env_prefix": "E2E_", "env_file": ".env", "env_file_encoding": "utf-8"}
 
-    # All tests hit mafia.terzocloud.com (Dev environment)
+    # Base URL for document-service. In CI this is set to the gateway URL
+    # (E2E_BASE_URL repo var). Default kept as mafia for local dev backwards-compat.
     base_url: str = "https://mafia.terzocloud.com"
     tenant_id: int = 1000012
-
-    # Gateway URL fronting the Nebula document-service (used by bulk-upload and
-    # any other gateway-native endpoints). Kept separate from base_url so the
-    # existing mafia.terzocloud.com tests are unchanged.
-    gateway_base_url: str = "https://terzoai-gateway-dev.terzocloud.com"
 
     # Source URL for bulk-upload test fixtures (blob/file share already populated)
     bulk_upload_source_url: str = "https://stterzoaidev.file.core.windows.net/fs-terzo-ai-dev"

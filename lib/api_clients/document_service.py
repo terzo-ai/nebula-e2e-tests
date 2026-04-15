@@ -69,6 +69,26 @@ class DocumentArtifactsResponse:
         )
 
 
+@dataclass
+class BulkUploadItem:
+    """One entry in a bulk-upload request's `items[]` array."""
+
+    name: str
+    content_type: str
+    size_bytes: int
+    document_type: str
+    source_url: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "contentType": self.content_type,
+            "sizeBytes": self.size_bytes,
+            "documentType": self.document_type,
+            "sourceUrl": self.source_url,
+        }
+
+
 class DocumentServiceClient:
     """Typed async HTTP client for the document-service API on mafia.terzocloud.com."""
 
@@ -77,7 +97,7 @@ class DocumentServiceClient:
         self._tenant_id = tenant_id
         headers = {"X-Tenant-Id": str(self._tenant_id)}
         if access_token:
-            headers["access-token"] = access_token
+            headers["Authorization"] = f"Bearer {access_token}"
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers=headers,
@@ -150,3 +170,28 @@ class DocumentServiceClient:
     async def delete_document(self, ufid: str) -> None:
         resp = await self._client.delete(f"/api/v1/documents/{ufid}")
         resp.raise_for_status()
+
+    async def bulk_upload(
+        self,
+        items: list[BulkUploadItem],
+        source: str = "BULK_IMPORT",
+        truncated: bool = True,
+        total_items: int | None = None,
+    ) -> dict[str, Any]:
+        """POST /api/v1/documents/bulk-upload.
+
+        Server pulls each item from its `source_url` — no client-side upload
+        step needed (unlike the singular presigned-upload flow).
+
+        When base_url points at the gateway (E2E_BASE_URL in CI), this hits:
+          {base_url}/api/v1/documents/bulk-upload
+        """
+        payload = {
+            "source": source,
+            "_truncated": truncated,
+            "_totalItems": total_items if total_items is not None else len(items),
+            "items": [item.to_json() for item in items],
+        }
+        resp = await self._client.post("/api/v1/documents/bulk-upload", json=payload)
+        resp.raise_for_status()
+        return resp.json()

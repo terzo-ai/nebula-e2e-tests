@@ -1,14 +1,21 @@
-name: E2E Nightly (Dev - mafia.terzocloud.com)
+name: E2E Nightly (Dev)
 
 on:
   schedule:
     - cron: "0 3 * * *" # 3 AM UTC daily
   workflow_dispatch:
+    inputs:
+      test_path:
+        description: "pytest path(s) to run (space-separated)"
+        type: string
+        default: "tests/"
 
 jobs:
   e2e-full:
     runs-on: ubuntu-latest
     environment: dev
+    env:
+      TEST_PATH: ${{ inputs.test_path || 'tests/' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -19,12 +26,13 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Run all E2E tests
-        run: uv run pytest tests/ -v --timeout=900 --alluredir=allure-results
+      - name: Run E2E tests
+        run: uv run pytest $TEST_PATH -v --timeout=900 --alluredir=allure-results
         env:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}
           E2E_ACCESS_TOKEN: ${{ secrets.E2E_ACCESS_TOKEN }}
+          E2E_BULK_UPLOAD_SOURCE_URL: ${{ vars.E2E_BULK_UPLOAD_SOURCE_URL }}
           E2E_DRIVE_PASSWORD: ${{ secrets.E2E_DRIVE_PASSWORD }}
           E2E_EVENT_HUB_CONNECTION_STRING: ${{ secrets.E2E_EVENT_HUB_CONNECTION_STRING }}
           E2E_EVENT_HUB_NAME: ${{ vars.E2E_EVENT_HUB_NAME }}

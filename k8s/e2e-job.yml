@@ -5,7 +5,7 @@ metadata:
   namespace: terzo-squad
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 86400
+  ttlSecondsAfterFinished: 86400  # auto-delete job after 24h
   template:
     metadata:
       labels:
@@ -13,7 +13,12 @@ spec:
       annotations:
         admission.datadoghq.com/enabled: "false"
     spec:
-      # Init container fetches token using curl (Datadog doesn't interfere with init containers)
+      # ------------------------------------------------------------------
+      # Init container: mint a Nebula gateway bearer using the long-lived
+      # dev auth-service key. Auth-service is reachable only from inside
+      # the cluster, so this is the natural place to do it. Token is
+      # written to a shared emptyDir the main container reads as E2E_TOKEN.
+      # ------------------------------------------------------------------
       initContainers:
       - name: fetch-token
         image: curlimages/curl
@@ -21,63 +26,79 @@ spec:
         - /bin/sh
         - -c
         - |
+          set -e
+          echo "Requesting bearer from auth-service-dev1..."
           TOKEN=$(curl -s --connect-timeout 10 \
             -X POST "http://auth-service-dev1.product-internal.terzocloud.com/auth/token" \
             -H "Content-Type: application/json" \
             -H "X-Access-Token: e9c4455dc79d417b986d0386eb7b3d25" \
-            -d '{"userId":1001359,"email":"shankar@terzocloud.com","tenantId":1000012,"grantType":"session_token"}' \
+            -d '{"userId":1000129,"email":"paventhan@terzocloud.com","tenantId":1000012,"grantType":"session_token"}' \
             | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
           if [ -z "$TOKEN" ]; then
-            echo "FAILED: could not fetch token"
+            echo "FAILED: could not extract token from auth-service response"
             exit 1
           fi
-          echo "$TOKEN" > /shared/access-token
-          echo "Token fetched successfully (${#TOKEN} chars)"
+          echo "$TOKEN" > /shared/token
+          echo "Token fetched (${#TOKEN} chars)"
         volumeMounts:
         - name: shared
           mountPath: /shared
+      # ------------------------------------------------------------------
+      # Main container: run the bulk-upload full-pipeline test.
+      # ------------------------------------------------------------------
       containers:
       - name: e2e
-        image: python:3.14-slim
+        image: python:3.12-slim
         command:
         - /bin/sh
         - -c
         - |
           set -e
-          export E2E_ACCESS_TOKEN=$(cat /shared/access-token)
-          echo "=== Token loaded (${#E2E_ACCESS_TOKEN} chars) ==="
+          export E2E_TOKEN="$(cat /shared/token)"
+          echo "=== E2E_TOKEN loaded (${#E2E_TOKEN} chars) ==="
 
-          echo "=== Testing token against mafia ==="
-          apt-get update -qq && apt-get install -y -qq git curl > /dev/null
-
-          echo "--- access-token header ---"
-          curl -s -w "\nHTTP %{http_code}\n" \
-            -H "X-Tenant-Id: 1000012" \
-            -H "access-token: $E2E_ACCESS_TOKEN" \
-            "https://mafia.terzocloud.com/api/v1/documents?size=1" || true
-
-          echo "=== Setup ==="
+          echo "=== Installing system deps ==="
           apt-get update -qq && apt-get install -y -qq git > /dev/null
           pip install uv --quiet
 
           echo "=== Cloning repo ==="
-          git clone https://github.com/terzo-ai/nebula-e2e-tests.git /app
+          git clone --depth=1 https://github.com/terzo-ai/nebula-e2e-tests.git /app
           cd /app
 
-          echo "=== Installing dependencies ==="
+          echo "=== Installing Python deps ==="
           uv sync
 
           echo "=== Run ID: $(date -u +%Y%m%d-%H%M%S) ==="
-          echo "=== Running smoke tests ==="
-          uv run pytest tests/api/test_smoke.py -v || true
-
-          echo "=== Running pipeline tests ==="
-          uv run pytest tests/api/ -v --timeout=900
+          echo "=== Running bulk-upload full-pipeline test ==="
+          uv run pytest tests/api/test_bulk_upload.py -v --timeout=1800
         env:
+        # Gateway + tenant
         - name: E2E_BASE_URL
-          value: "https://mafia.terzocloud.com"
+          value: "https://terzoai-gateway-dev.terzocloud.com"
         - name: E2E_TENANT_ID
           value: "1000012"
+        # Bulk-upload payload
+        - name: E2E_BULK_UPLOAD_SOURCE_URL
+          value: "https://stterzoaidev.file.core.windows.net/fs-terzo-ai-dev/nebula_e2e_test_files/tz_nebula_e2e.pdf"
+        - name: E2E_BULK_UPLOAD_FILE_NAME
+          value: "tz_nebula_e2e.pdf"
+        # Event Hub: comma-separated list of the 5 child hubs under
+        # the terzo-ai-nebula-events-dev namespace.
+        - name: E2E_EVENT_HUB_NAME
+          value: "terzo-ai-contract-document-events,terzo-ai-contract-metadata-events,terzo-ai-contract-outbox-events,terzo-ai-ocr-events,terzo-ai-platforms-file-ingest-events"
+        # Connection string from an existing K8s Secret. Create with e.g.:
+        #   kubectl create secret generic nebula-e2e-secrets \
+        #     -n terzo-squad \
+        #     --from-literal=event-hub-connection-string='<namespace-scoped SAS conn string>'
+        # If the secret is absent, the test still runs and records SKIPPED
+        # steps for the 7 pipeline events (bulk-upload POST assertion
+        # alone will tell us the auth path works).
+        - name: E2E_EVENT_HUB_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: nebula-e2e-secrets
+              key: event-hub-connection-string
+              optional: true
         volumeMounts:
         - name: shared
           mountPath: /shared

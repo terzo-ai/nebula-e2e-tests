@@ -1,10 +1,9 @@
 """Gateway-based client for the Nebula document-service.
 
-`base_url` is expected to include the service prefix, e.g.:
-  https://terzoai-gateway-dev.terzocloud.com/nebula/document-service
-
-so requests land at `{base_url}/api/v1/...`. In CI this is driven by
-the E2E_BASE_URL repo variable.
+`base_url` is the bare gateway host (e.g. `https://terzoai-gateway-dev.terzocloud.com`).
+The service-path prefix `/nebula/document-service/api/v1` is added by the client,
+so requests land at `{base_url}/nebula/document-service/api/v1/...`.
+In CI, `base_url` is driven by the E2E_BASE_URL repo variable.
 """
 
 from __future__ import annotations
@@ -86,10 +85,12 @@ def _walk_for_ufids(node: Any, out: list[str]) -> None:
 class GatewayDocumentServiceClient:
     """Async HTTP client for Nebula document-service (via terzoai-gateway).
 
-    base_url must include the service prefix, e.g.
-    `https://.../nebula/document-service`. All endpoint paths are relative
-    to `{base_url}/api/v1`.
+    base_url is the bare gateway host (no service prefix). The
+    `/nebula/document-service/api/v1` prefix is added here so callers
+    can share one `E2E_BASE_URL` repo variable across clients.
     """
+
+    SERVICE_PREFIX = "/nebula/document-service/api/v1"
 
     def __init__(self, base_url: str, tenant_id: int, access_token: str = "") -> None:
         self._base_url = base_url.rstrip("/")
@@ -113,7 +114,7 @@ class GatewayDocumentServiceClient:
         truncated: bool = True,
         total_items: int | None = None,
     ) -> BulkUploadResponse:
-        """POST {base_url}/api/v1/documents/bulk-upload.
+        """POST {base_url}/nebula/document-service/api/v1/documents/bulk-upload.
 
         Server pulls each item from its `source_url` — no client-side upload
         step needed (unlike the singular presigned-upload flow). Downstream
@@ -126,6 +127,8 @@ class GatewayDocumentServiceClient:
             "_totalItems": total_items if total_items is not None else len(items),
             "items": [item.to_json() for item in items],
         }
-        resp = await self._client.post("/api/v1/documents/bulk-upload", json=payload)
+        resp = await self._client.post(
+            f"{self.SERVICE_PREFIX}/documents/bulk-upload", json=payload
+        )
         resp.raise_for_status()
         return BulkUploadResponse.from_json(resp.json())

@@ -276,6 +276,19 @@ class EventHubListener:
             for e in self._events
         )
 
+    def event_types_for(self, ufid: str) -> list[str]:
+        """Distinct event types captured for a ufid, in arrival order.
+
+        Primary diagnostic for "what did the listener actually see for
+        this document?" Used by waits/timeouts and the end-of-test summary
+        so CI logs always show the observed event stream for the ufid.
+        """
+        seen: list[str] = []
+        for event in self.events_for(ufid):
+            if event.event_type not in seen:
+                seen.append(event.event_type)
+        return seen
+
     def find_duplicates(self) -> list[tuple[CapturedEvent, CapturedEvent]]:
         """Find pairs of events with same (document_id, event_type)."""
         seen: dict[tuple[str, str], CapturedEvent] = {}
@@ -325,10 +338,12 @@ class EventHubListener:
         type_label = event_type or "<any>"
         logger.info(
             "Waiting for event: type=%s ufid=%s timeout=%.1fs "
-            "(hubs=%s group=%s partitions=%s total_events=%d per_partition=%s)",
+            "(hubs=%s group=%s partitions=%s total_events=%d per_partition=%s "
+            "captured_types_for_ufid=%s)",
             type_label, ufid, timeout,
             hubs, self._consumer_group, ",".join(self._partition_ids),
             self._total_events_received, self._events_per_partition,
+            self.event_types_for(ufid),
         )
         last_heartbeat = time.monotonic()
 
@@ -354,11 +369,12 @@ class EventHubListener:
                 logger.warning(
                     "Timed out waiting for event: type=%s ufid=%s after %.1fs "
                     "(hubs=%s group=%s total_events=%d per_partition=%s "
-                    "captured_for_ufid=%d)",
+                    "captured_for_ufid=%d captured_types_for_ufid=%s)",
                     type_label, ufid, timeout,
                     hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
                     len(self.events_for(ufid)),
+                    self.event_types_for(ufid),
                 )
                 raise EventTimeoutError(ufid, event_type or "<any>", timeout)
 
@@ -369,11 +385,12 @@ class EventHubListener:
                 logger.info(
                     "Still waiting: type=%s ufid=%s elapsed=%.0fs remaining=%.0fs "
                     "(hubs=%s group=%s total_events=%d per_partition=%s "
-                    "captured_for_ufid=%d)",
+                    "captured_for_ufid=%d captured_types_for_ufid=%s)",
                     type_label, ufid, timeout - remaining, remaining,
                     hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
                     len(self.events_for(ufid)),
+                    self.event_types_for(ufid),
                 )
                 last_heartbeat = now
 

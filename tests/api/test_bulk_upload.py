@@ -23,6 +23,7 @@ the `pipeline-report-nightly` / `pipeline-report` workflow artifact.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,8 @@ from lib.run_context import RunContext
 
 if TYPE_CHECKING:
     from lib.event_hub import EventHubListener
+
+logger = logging.getLogger(__name__)
 
 
 FAILURE_EVENT = "com.terzo.document.failed"
@@ -275,10 +278,28 @@ def _attach_events_to_last_step(
 ) -> None:
     """Attach captured Event Hub events to the last report step so they
     render in the HTML timeline, regardless of which code path finished
-    the stage loop (PASS, failure-event short-circuit, or force-kill)."""
+    the stage loop (PASS, failure-event short-circuit, or force-kill).
+
+    Also emits a single summary log line naming every event type the
+    listener received for this ufid — invaluable when diagnosing "the
+    event we were waiting for never fired; what DID fire?" cases.
+    """
     trace = pipeline_report._find_trace(ufid)
     if trace and trace.steps:
         trace.steps[-1].events = event_listener.events_for(ufid)
+
+    captured_types = event_listener.event_types_for(ufid)
+    events = event_listener.events_for(ufid)
+    logger.info(
+        "Event Hub summary for ufid=%s: %d event(s) captured, distinct types=%s",
+        ufid, len(events), captured_types or "[]",
+    )
+    for event in events:
+        logger.info(
+            "  captured: type=%s partition=%s seq=%d received_at=%s",
+            event.event_type, event.partition_id,
+            event.sequence_number, event.received_at,
+        )
 
 
 def _failure_reason(event_listener: "EventHubListener", ufid: str) -> str:

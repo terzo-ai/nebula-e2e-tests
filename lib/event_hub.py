@@ -47,23 +47,37 @@ class EventTimeoutError(Exception):
 
 
 class EventHubListener:
-    """Async context manager that listens to Event Hub events for specific document IDs."""
+    """Async context manager that listens to one or more Event Hubs.
+
+    Accepts a single hub name or a list of hub names (all under the same
+    Event Hub namespace / connection string). Spins up one
+    EventHubConsumerClient per hub and merges captured events into a
+    single timeline, so callers can use watch()/wait_for_event() without
+    caring which hub an event came from.
+    """
 
     def __init__(
         self,
         connection_string: str,
-        event_hub_name: str,
+        event_hub_name: str | list[str],
         consumer_group: str = "probe-test",
         timeout: float = 120.0,
     ) -> None:
         self._connection_string = connection_string
-        self._event_hub_name = event_hub_name
+        if isinstance(event_hub_name, str):
+            # Support comma-separated strings for easy env-var wiring.
+            names = [n.strip() for n in event_hub_name.split(",") if n.strip()]
+        else:
+            names = [n for n in event_hub_name if n]
+        if not names:
+            raise ValueError("event_hub_name must contain at least one non-empty hub name")
+        self._event_hub_names: list[str] = names
         self._consumer_group = consumer_group
         self._timeout = timeout
         self._watched_ufids: set[str] = set()
         self._events: list[CapturedEvent] = []
-        self._consumer = None
-        self._receive_task: asyncio.Task | None = None
+        self._consumers: list[Any] = []
+        self._receive_tasks: list[asyncio.Task] = []
         self._new_event = asyncio.Event()
 
     async def __aenter__(self) -> EventHubListener:
@@ -75,33 +89,45 @@ class EventHubListener:
                 "Install with: uv add azure-eventhub"
             )
 
-        self._consumer = EventHubConsumerClient.from_connection_string(
-            self._connection_string,
-            consumer_group=self._consumer_group,
-            eventhub_name=self._event_hub_name,
-        )
-        self._receive_task = asyncio.create_task(self._receive_loop())
-        logger.info(
-            "Event Hub listener started: hub=%s group=%s",
-            self._event_hub_name, self._consumer_group,
-        )
+        for hub_name in self._event_hub_names:
+            consumer = EventHubConsumerClient.from_connection_string(
+                self._connection_string,
+                consumer_group=self._consumer_group,
+                eventhub_name=hub_name,
+            )
+            self._consumers.append(consumer)
+            self._receive_tasks.append(
+                asyncio.create_task(self._receive_loop(consumer, hub_name))
+            )
+            logger.info(
+                "Event Hub listener started: hub=%s group=%s",
+                hub_name, self._consumer_group,
+            )
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
-        if self._receive_task and not self._receive_task.done():
-            self._receive_task.cancel()
+        for task in self._receive_tasks:
+            if not task.done():
+                task.cancel()
+        for task in self._receive_tasks:
             try:
-                await self._receive_task
+                await task
             except asyncio.CancelledError:
                 pass
-        if self._consumer:
-            await self._consumer.close()
+            except Exception:
+                logger.exception("Event Hub receive task ended with error")
+        for consumer in self._consumers:
+            try:
+                await consumer.close()
+            except Exception:
+                logger.exception("Error closing EventHubConsumerClient")
         logger.info(
-            "Event Hub listener stopped. Captured %d event(s).", len(self._events)
+            "Event Hub listener stopped. Captured %d event(s) across %d hub(s).",
+            len(self._events), len(self._event_hub_names),
         )
 
-    async def _receive_loop(self) -> None:
-        """Background task: receive events from all partitions."""
+    async def _receive_loop(self, consumer: Any, hub_name: str) -> None:
+        """Background task: receive events from all partitions of one hub."""
         async def on_event(partition_context, event):
             if event is None:
                 return
@@ -132,29 +158,29 @@ class EventHubListener:
                     timestamp=time.monotonic(),
                     received_at=datetime.now(timezone.utc).isoformat(),
                     sequence_number=event.sequence_number or 0,
-                    partition_id=partition_context.partition_id,
+                    partition_id=f"{hub_name}/{partition_context.partition_id}",
                     payload=payload,
                 )
                 self._events.append(captured)
                 self._new_event.set()
                 self._new_event.clear()
                 logger.info(
-                    "Captured event: type=%s doc=%s partition=%s seq=%d",
-                    event_type, doc_id,
+                    "Captured event: hub=%s type=%s doc=%s partition=%s seq=%d",
+                    hub_name, event_type, doc_id,
                     partition_context.partition_id, captured.sequence_number,
                 )
 
             await partition_context.update_checkpoint(event)
 
         try:
-            await self._consumer.receive(
+            await consumer.receive(
                 on_event=on_event,
                 starting_position="@latest",
             )
         except asyncio.CancelledError:
             pass
         except Exception:
-            logger.exception("Event Hub receive loop error")
+            logger.exception("Event Hub receive loop error (hub=%s)", hub_name)
 
     def watch(self, ufid: str) -> None:
         """Register a document ID to capture events for."""

@@ -1,11 +1,11 @@
 """Two-step auth flow for Nebula E2E tests.
 
-  Step 1 (public):  POST {mafia_base_url}/_/api/auth/login/password
+  Step 1 (public):  POST {analytics_base_url}/_/api/auth/login/password
                     with email + password + X-XSRF-TOKEN + Cookie
-                    → returns a mafia ACCESS_TOKEN.
+                    → returns an Analytics ACCESS_TOKEN.
 
   Step 2 (internal): POST {auth_service_url}/auth/token
-                    with X-Access-Token: <mafia ACCESS_TOKEN>
+                    with X-Access-Token: <Analytics ACCESS_TOKEN>
                     and {userId, email, tenantId, grantType}
                     → returns the bearer token the Nebula gateway expects.
 
@@ -27,33 +27,33 @@ class AuthError(RuntimeError):
     """Raised when either step of the auth flow fails."""
 
 
-async def fetch_mafia_access_token(config: E2EConfig) -> str:
-    """Step 1: log in to mafia and return the ACCESS_TOKEN.
+async def fetch_analytics_access_token(config: E2EConfig) -> str:
+    """Step 1: log in to Analytics and return the ACCESS_TOKEN.
 
-    Uses the `mafia_*` config fields (email, password, xsrf_token, cookie).
+    Uses the `analytics_*` config fields (email, password, xsrf_token, cookie).
     """
-    if not (config.mafia_email and config.mafia_password):
+    if not (config.analytics_email and config.analytics_password):
         raise AuthError(
-            "mafia_email / mafia_password must be set (E2E_MAFIA_EMAIL / "
-            "E2E_MAFIA_PASSWORD) to run the two-step auth flow"
+            "analytics_email / analytics_password must be set (E2E_ANALYTICS_EMAIL / "
+            "E2E_ANALYTICS_PASSWORD) to run the two-step auth flow"
         )
-    if not (config.mafia_xsrf_token and config.mafia_cookie):
+    if not (config.analytics_xsrf_token and config.analytics_cookie):
         raise AuthError(
-            "mafia_xsrf_token / mafia_cookie must be set "
-            "(E2E_MAFIA_XSRF_TOKEN / E2E_MAFIA_COOKIE)"
+            "analytics_xsrf_token / analytics_cookie must be set "
+            "(E2E_ANALYTICS_XSRF_TOKEN / E2E_ANALYTICS_COOKIE)"
         )
 
-    url = f"{config.mafia_base_url.rstrip('/')}/_/api/auth/login/password"
+    url = f"{config.analytics_base_url.rstrip('/')}/_/api/auth/login/password"
     headers = {
-        "Origin": config.mafia_base_url,
-        "Referer": f"{config.mafia_base_url.rstrip('/')}/login",
+        "Origin": config.analytics_base_url,
+        "Referer": f"{config.analytics_base_url.rstrip('/')}/login",
         "Content-Type": "application/json",
-        "X-XSRF-TOKEN": config.mafia_xsrf_token,
-        "Cookie": config.mafia_cookie,
+        "X-XSRF-TOKEN": config.analytics_xsrf_token,
+        "Cookie": config.analytics_cookie,
     }
     body = {
-        "email": config.mafia_email,
-        "password": config.mafia_password,
+        "email": config.analytics_email,
+        "password": config.analytics_password,
         "type": "b",
     }
 
@@ -61,20 +61,20 @@ async def fetch_mafia_access_token(config: E2EConfig) -> str:
         resp = await client.post(url, headers=headers, json=body)
         if resp.status_code >= 400:
             raise AuthError(
-                f"mafia login failed: {resp.status_code} {resp.reason_phrase}\n"
+                f"Analytics login failed: {resp.status_code} {resp.reason_phrase}\n"
                 f"  url: {url}\n"
                 f"  response body: {resp.text[:2000]}"
             )
 
-    return _extract_token_from_response(resp.json(), step="mafia login")
+    return _extract_token_from_response(resp.json(), step="Analytics login")
 
 
-async def fetch_auth_service_bearer(config: E2EConfig, mafia_access_token: str) -> str:
-    """Step 2: exchange the mafia ACCESS_TOKEN for a Nebula gateway bearer."""
+async def fetch_auth_service_bearer(config: E2EConfig, analytics_access_token: str) -> str:
+    """Step 2: exchange the Analytics ACCESS_TOKEN for a Nebula gateway bearer."""
     url = f"{config.auth_service_url.rstrip('/')}/auth/token"
     headers = {
         "Content-Type": "application/json",
-        "X-Access-Token": mafia_access_token,
+        "X-Access-Token": analytics_access_token,
     }
     body = {
         "userId": str(config.auth_user_id),
@@ -101,8 +101,8 @@ async def fetch_access_token(config: E2EConfig) -> str:
 
     Called by the `access_token` pytest fixture when `config.token` is empty.
     """
-    mafia_token = await fetch_mafia_access_token(config)
-    return await fetch_auth_service_bearer(config, mafia_token)
+    analytics_token = await fetch_analytics_access_token(config)
+    return await fetch_auth_service_bearer(config, analytics_token)
 
 
 def _extract_token_from_response(data: Any, *, step: str) -> str:

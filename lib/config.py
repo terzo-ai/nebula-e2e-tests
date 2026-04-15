@@ -24,18 +24,18 @@ class E2EConfig(BaseSettings):
     bulk_upload_file_name: str = "tz_nebula_e2e.pdf"
 
     # --- Auth (two-step flow) ---
-    # Step 1: log into mafia (public) with email/password to get an ACCESS_TOKEN.
+    # Step 1: log into Analytics (public) with email/password to get an ACCESS_TOKEN.
     # Step 2: call auth-service (internal) with that ACCESS_TOKEN as X-Access-Token
     # to exchange for the bearer token used against the Nebula gateway.
     #
     # If `token` is set directly (via E2E_TOKEN), both steps are skipped.
 
-    # Step 1 — mafia login
-    mafia_base_url: str = "https://mafia.terzocloud.com"
-    mafia_email: str = ""       # via E2E_MAFIA_EMAIL secret
-    mafia_password: str = ""    # via E2E_MAFIA_PASSWORD secret
-    mafia_xsrf_token: str = ""  # via E2E_MAFIA_XSRF_TOKEN secret
-    mafia_cookie: str = ""      # via E2E_MAFIA_COOKIE secret
+    # Step 1 — Analytics login
+    analytics_base_url: str = "https://mafia.terzocloud.com"
+    analytics_email: str = ""       # via E2E_ANALYTICS_EMAIL secret
+    analytics_password: str = ""    # via E2E_ANALYTICS_PASSWORD secret
+    analytics_xsrf_token: str = ""  # via E2E_ANALYTICS_XSRF_TOKEN secret
+    analytics_cookie: str = ""      # via E2E_ANALYTICS_COOKIE secret
 
     # Step 2 — auth-service token exchange (reachable from Dev cluster)
     auth_service_url: str = "http://auth-service-dev1.product-internal.terzocloud.com"

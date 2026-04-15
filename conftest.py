@@ -23,7 +23,7 @@ async def access_token(config: E2EConfig, pipeline_report: PipelineReport) -> st
 
     Preference order:
       1. E2E_TOKEN env var (manual override) → `config.token`
-      2. Two-step auth flow: mafia login → auth-service exchange
+      2. Two-step auth flow: Analytics login → auth-service exchange
     """
     if config.token:
         return config.token

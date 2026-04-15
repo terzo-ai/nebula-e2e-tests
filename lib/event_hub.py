@@ -18,7 +18,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,22 @@ class EventHubListener:
     # We work around it by explicitly fanning out one receive task per partition.
     DEFAULT_PARTITION_IDS: tuple[str, ...] = ("0", "1", "2", "3")
 
+    # After spawning receive tasks, pause briefly before returning from
+    # __aenter__ so the AMQP links for every partition have time to open and
+    # subscribe. Without this, a caller can fire an API request fast enough
+    # that the first few pipeline events are emitted before the receivers
+    # are actually listening, causing flaky missed-event failures.
+    STARTUP_WARMUP_SECONDS: float = 2.0
+
+    # Fail-safe lookback: start reading the stream from N minutes before
+    # "now" so that if the AMQP subscribe is slower than STARTUP_WARMUP_SECONDS
+    # (or the API is called before __aenter__ completes), we still replay any
+    # events the producer emitted in the immediate past. 10 minutes comfortably
+    # covers slow subscribes without pulling in stale history from prior runs —
+    # the event filter in on_event() only captures events for watched ufids
+    # anyway, and a ufid is only created by this run.
+    STARTUP_LOOKBACK_MINUTES: float = 10.0
+
     def __init__(
         self,
         connection_string: str,
@@ -91,6 +107,8 @@ class EventHubListener:
         self._consumers: list[Any] = []
         self._receive_tasks: list[asyncio.Task] = []
         self._new_event = asyncio.Event()
+        # Set on __aenter__ to "now - STARTUP_LOOKBACK_MINUTES".
+        self._starting_position: datetime | None = None
 
     async def __aenter__(self) -> EventHubListener:
         try:
@@ -100,6 +118,12 @@ class EventHubListener:
                 "azure-eventhub is required for Event Hub listening. "
                 "Install with: uv add azure-eventhub"
             )
+
+        # Fail-safe: subscribe from N minutes before "now" so events emitted
+        # during the AMQP subscribe window are still replayed to us.
+        self._starting_position = datetime.now(timezone.utc) - timedelta(
+            minutes=self.STARTUP_LOOKBACK_MINUTES
+        )
 
         for hub_name in self._event_hub_names:
             consumer = EventHubConsumerClient.from_connection_string(
@@ -118,9 +142,16 @@ class EventHubListener:
                     )
                 )
             logger.info(
-                "Event Hub listener started: hub=%s group=%s partitions=%s",
+                "Event Hub listener started: hub=%s group=%s partitions=%s "
+                "starting_from=%s",
                 hub_name, self._consumer_group, ",".join(self._partition_ids),
+                self._starting_position.isoformat(),
             )
+
+        # Give AMQP links time to open and subscribe before the caller fires
+        # the first producer-side request.
+        if self.STARTUP_WARMUP_SECONDS > 0:
+            await asyncio.sleep(self.STARTUP_WARMUP_SECONDS)
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -196,7 +227,7 @@ class EventHubListener:
             await consumer.receive(
                 on_event=on_event,
                 partition_id=partition_id,
-                starting_position="@latest",
+                starting_position=self._starting_position,
             )
         except asyncio.CancelledError:
             pass

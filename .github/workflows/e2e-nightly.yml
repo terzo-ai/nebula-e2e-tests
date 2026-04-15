@@ -35,7 +35,7 @@ jobs:
           E2E_TOKEN: ${{ secrets.E2E_TOKEN }}
           # Two-step auth flow (used when E2E_TOKEN is empty):
           #   Step 1 — Analytics login
-          E2E_ANALYTICS_EMAIL: ${{ secrets.E2E_ANALYTICS_EMAIL }}
+          E2E_ANALYTICS_EMAIL: ${{ vars.E2E_ANALYTICS_EMAIL }}
           E2E_ANALYTICS_PASSWORD: ${{ secrets.E2E_ANALYTICS_PASSWORD }}
           E2E_ANALYTICS_XSRF_TOKEN: ${{ secrets.E2E_ANALYTICS_XSRF_TOKEN }}
           E2E_ANALYTICS_COOKIE: ${{ secrets.E2E_ANALYTICS_COOKIE }}

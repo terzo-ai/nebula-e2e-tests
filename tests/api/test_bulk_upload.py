@@ -49,13 +49,18 @@ class ExpectedEvent:
 # completions can take minutes; the intermediate *.queued events fire
 # synchronously inside Document Service right after the prior completion.
 PIPELINE_EVENTS: list[ExpectedEvent] = [
-    ExpectedEvent("com.terzo.document.uploaded",             "Document Service",    "Document uploaded (worker-pod download complete)", 300),
-    ExpectedEvent("com.terzo.document.ocr.queued",           "Document Service",    "OCR queued",                                       30),
-    ExpectedEvent("com.terzo.document.ocr.completed",        "OCR Service",         "OCR completed",                                    300),
-    ExpectedEvent("com.terzo.document.extraction.queued",    "Document Service",    "Extraction queued",                                30),
-    ExpectedEvent("com.terzo.document.extraction.completed", "Extraction Service",  "Extraction completed",                             300),
-    ExpectedEvent("com.terzo.document.ingestion.queued",     "Document Service",    "Ingestion queued",                                 30),
-    ExpectedEvent("com.terzo.document.ingestion.completed",  "Ingestion Service",   "Ingestion completed",                              300),
+    # Report step → service mapping (grouped by pipeline stage, not by producer):
+    #   Document Service    : document.uploaded, document.failed
+    #   OCR Service         : document.ocr.queued, document.ocr.completed
+    #   Extraction Service  : document.extraction.queued, document.extraction.completed
+    #   Ingestion Service   : document.ingestion.queued, document.ingestion.completed
+    ExpectedEvent("com.terzo.document.uploaded",             "Document Service",   "Document uploaded (worker-pod download complete)", 300),
+    ExpectedEvent("com.terzo.document.ocr.queued",           "OCR Service",        "OCR queued",                                       30),
+    ExpectedEvent("com.terzo.document.ocr.completed",        "OCR Service",        "OCR completed",                                    300),
+    ExpectedEvent("com.terzo.document.extraction.queued",    "Extraction Service", "Extraction queued",                                30),
+    ExpectedEvent("com.terzo.document.extraction.completed", "Extraction Service", "Extraction completed",                             300),
+    ExpectedEvent("com.terzo.document.ingestion.queued",     "Ingestion Service",  "Ingestion queued",                                 30),
+    ExpectedEvent("com.terzo.document.ingestion.completed",  "Ingestion Service",  "Ingestion completed",                              300),
 ]
 
 
@@ -100,7 +105,7 @@ async def test_bulk_upload_full_pipeline(
     # Record the upload itself as the first step
     pipeline_report.record_step(
         ufid,
-        "Gateway / Document Service",
+        "Document Service",
         "bulk-upload accepted",
         StepStatus.PASS,
         details=f"POST /api/v1/documents/bulk-upload → ufid {ufid}",

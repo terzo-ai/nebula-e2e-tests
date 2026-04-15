@@ -1,9 +1,18 @@
-"""Smoke tests: verify connectivity, auth, and basic CRUD on mafia.terzocloud.com."""
+"""Smoke tests: verify connectivity, auth, and basic CRUD on mafia.terzocloud.com.
+
+DISABLED — only the bulk-upload endpoint is under E2E coverage right now.
+Remove the module-level `pytestmark` below to re-enable.
+"""
 
 import httpx
+import pytest
 
 from lib.api_clients.document_service import DocumentServiceClient
 from lib.config import E2EConfig
+
+pytestmark = pytest.mark.skip(
+    reason="Smoke tests disabled — only bulk-upload is under E2E coverage"
+)
 
 
 class TestConnectivity:

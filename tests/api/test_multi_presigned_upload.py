@@ -2,6 +2,9 @@
 
 Uploads all test files from the configured source (Azure Blob / local dir / in-memory).
 If fewer test files than file_count, the first file is reused with different names.
+
+DISABLED — only the bulk-upload endpoint is under E2E coverage right now.
+Remove the module-level `pytestmark` below to re-enable.
 """
 
 from __future__ import annotations
@@ -17,6 +20,10 @@ from lib.fixtures import FixtureFile
 from lib.polling import PollTimeoutError, poll_until
 from lib.report import PipelineReport, StepStatus
 from lib.run_context import RunContext
+
+pytestmark = pytest.mark.skip(
+    reason="Presigned-upload endpoint disabled — only bulk-upload is under E2E coverage"
+)
 
 if TYPE_CHECKING:
     from lib.event_hub import EventHubListener

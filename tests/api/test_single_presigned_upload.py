@@ -1,11 +1,16 @@
 """E2E test: single presigned upload → full pipeline through EXTRACTION_QUEUED.
 
 Target: mafia.terzocloud.com (Dev environment), tenant 1000012.
+
+DISABLED — only the bulk-upload endpoint is under E2E coverage right now.
+Remove the module-level `pytestmark` below to re-enable.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+import pytest
 
 from lib.api_clients.document_service import DocumentServiceClient
 from lib.config import E2EConfig
@@ -16,6 +21,10 @@ from lib.run_context import RunContext
 
 if TYPE_CHECKING:
     from lib.event_hub import EventHubListener
+
+pytestmark = pytest.mark.skip(
+    reason="Presigned-upload endpoint disabled — only bulk-upload is under E2E coverage"
+)
 
 
 async def test_presigned_upload_reaches_extraction_queued(

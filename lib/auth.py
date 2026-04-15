@@ -16,6 +16,7 @@ from inside the Dev cluster. So step 2 will fail from GitHub-hosted runners
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -66,7 +67,7 @@ async def fetch_analytics_access_token(config: E2EConfig) -> str:
                 f"  response body: {resp.text[:2000]}"
             )
 
-    return _extract_token_from_response(resp.json(), step="Analytics login")
+    return _extract_token_from_http_response(resp, step="Analytics login")
 
 
 async def fetch_auth_service_bearer(config: E2EConfig, analytics_access_token: str) -> str:
@@ -93,7 +94,7 @@ async def fetch_auth_service_bearer(config: E2EConfig, analytics_access_token: s
                 f"  response body: {resp.text[:2000]}"
             )
 
-    return _extract_token_from_response(resp.json(), step="auth-service exchange")
+    return _extract_token_from_http_response(resp, step="auth-service exchange")
 
 
 async def fetch_access_token(config: E2EConfig) -> str:
@@ -103,6 +104,48 @@ async def fetch_access_token(config: E2EConfig) -> str:
     """
     analytics_token = await fetch_analytics_access_token(config)
     return await fetch_auth_service_bearer(config, analytics_token)
+
+
+def _extract_token_from_http_response(resp: httpx.Response, *, step: str) -> str:
+    """Find a token in the HTTP response. Tries, in order:
+      1. JSON body (common shapes via _extract_token_from_response)
+      2. Plain-text body that looks like a single-line token
+      3. Response headers: authorization, x-access-token, access-token, token
+    On complete failure, dumps status / content-type / body preview / header keys
+    in the raised AuthError so we can see what the server actually returned.
+    """
+    # 1. JSON body
+    try:
+        data = resp.json()
+    except (json.JSONDecodeError, ValueError):
+        data = None
+    if data is not None:
+        try:
+            return _extract_token_from_response(data, step=step)
+        except AuthError:
+            pass  # fall through to header / text-body lookups
+
+    # 2. Plain-text body (single-line, reasonable length)
+    body_stripped = (resp.text or "").strip()
+    if body_stripped and "\n" not in body_stripped and " " not in body_stripped and 16 <= len(body_stripped) <= 4096:
+        return body_stripped
+
+    # 3. Response headers
+    for header_name in ("authorization", "x-access-token", "access-token", "token"):
+        value = resp.headers.get(header_name, "").strip()
+        if value:
+            if value.lower().startswith("bearer "):
+                value = value[7:].strip()
+            if value:
+                return value
+
+    raise AuthError(
+        f"{step}: could not find token in response.\n"
+        f"  status: {resp.status_code} {resp.reason_phrase}\n"
+        f"  content-type: {resp.headers.get('content-type', '(none)')!r}\n"
+        f"  body (first 1000 chars): {resp.text[:1000]!r}\n"
+        f"  response header keys: {sorted(resp.headers.keys())}"
+    )
 
 
 def _extract_token_from_response(data: Any, *, step: str) -> str:

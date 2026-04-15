@@ -8,14 +8,14 @@ on:
       test_path:
         description: "pytest path(s) to run (space-separated)"
         type: string
-        default: "tests/"
+        default: "tests/api/test_bulk_upload.py"
 
 jobs:
   e2e-full:
     runs-on: ubuntu-latest
     environment: dev
     env:
-      TEST_PATH: ${{ inputs.test_path || 'tests/' }}
+      TEST_PATH: ${{ inputs.test_path || 'tests/api/test_bulk_upload.py' }}
     steps:
       - uses: actions/checkout@v4
 

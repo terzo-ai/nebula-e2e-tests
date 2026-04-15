@@ -10,9 +10,12 @@ PASS/FAIL pipeline-report row for each stage:
     4. Extraction Service: PASS on com.terzo.document.extraction.completed
     5. Ingestion Service : PASS on com.terzo.document.ingestion.completed
 
-Each stage has its own independent timeout that starts when the stage is
-entered — a slow OCR stage does not eat into the Extraction or Ingestion
-budget. `com.terzo.document.failed` short-circuits remaining stages to FAIL.
+Each stage has its own independent 10-minute timeout that starts when
+the stage is entered — a slow OCR stage does not eat into the Extraction
+or Ingestion budget. A hard timeout force-kills the test immediately
+(remaining stages recorded as SKIPPED) so the job can never hang past
+~10 minutes on a single stage. `com.terzo.document.failed` also
+short-circuits remaining stages to FAIL with the payload's failure_reason.
 
 The HTML pipeline report is rendered at session teardown and uploaded as
 the `pipeline-report-nightly` / `pipeline-report` workflow artifact.
@@ -57,34 +60,38 @@ class PipelineStage:
     timeout_s: float
 
 
-# Ordered per docs/EVENT_TYPES.md. Each stage owns its own wall-clock
-# budget — exceeding it fails only that stage (subsequent stages still
-# run with their own fresh timeout), unless the pipeline emits
-# `com.terzo.document.failed`, in which case remaining stages short-circuit.
+# Per-stage wall-clock budget. Each stage gets a fresh 10-minute timer
+# that starts when the stage is entered. If the timer expires without the
+# expected event arriving, the test force-kills: that stage is recorded
+# FAIL, remaining stages are recorded SKIPPED, and pytest.fail() aborts —
+# the run can never hang past ~10 minutes on a single stage.
+STAGE_TIMEOUT_S: float = 600.0
+
+# Ordered per docs/EVENT_TYPES.md.
 PIPELINE_STAGES: list[PipelineStage] = [
     PipelineStage(
         service="Event Hub",
         description="Event Hub listener received first event for ufid",
         event_type=None,
-        timeout_s=900,
+        timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
         service="OCR Service",
         description="OCR completed",
         event_type="com.terzo.document.ocr.completed",
-        timeout_s=900,
+        timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
         service="Extraction Service",
         description="AI Extraction completed",
         event_type="com.terzo.document.extraction.completed",
-        timeout_s=900,
+        timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
         service="Ingestion Service",
         description="Ingestion completed",
         event_type="com.terzo.document.ingestion.completed",
-        timeout_s=900,
+        timeout_s=STAGE_TIMEOUT_S,
     ),
 ]
 
@@ -160,10 +167,10 @@ async def test_bulk_upload_full_pipeline(
     event_listener.watch(ufid)
 
     aborted = False
-    for stage in PIPELINE_STAGES:
+    for stage_idx, stage in enumerate(PIPELINE_STAGES):
         # Short-circuit: a prior stage already saw the failure event, or
-        # one arrived between stages. Each remaining stage is recorded as
-        # FAIL with the failure_reason rather than silently skipped.
+        # one arrived between stages. Record each remaining stage as FAIL
+        # with the failure_reason — no further Event Hub waits happen.
         if aborted or event_listener.has_event(ufid, FAILURE_EVENT):
             aborted = True
             failure_reason = _failure_reason(event_listener, ufid)
@@ -205,8 +212,8 @@ async def test_bulk_upload_full_pipeline(
                 ),
             )
         except Exception as e:  # EventTimeoutError, etc.
-            # The failure event may have arrived during the wait — treat
-            # that as the cause rather than a generic timeout.
+            # If the failure event arrived during the wait, treat that as
+            # the cause and let the short-circuit handle remaining stages.
             if event_listener.has_event(ufid, FAILURE_EVENT):
                 aborted = True
                 failure_reason = _failure_reason(event_listener, ufid)
@@ -218,27 +225,57 @@ async def test_bulk_upload_full_pipeline(
                         f"failure_reason: {failure_reason}"
                     ),
                 )
-            else:
-                expected_label = stage.event_type or "<any event for ufid>"
+                continue
+
+            # Hard timeout with no failure event — force-kill the run.
+            # Record this stage FAIL, remaining stages SKIPPED (they
+            # genuinely never ran), attach captured events, then abort.
+            expected_label = stage.event_type or "<any event for ufid>"
+            timeout_msg = (
+                f"Timed out after {stage.timeout_s:.0f}s waiting for "
+                f"{expected_label}. {type(e).__name__}: {e}"
+            )
+            pipeline_report.record_step(
+                ufid, stage.service, stage.description,
+                StepStatus.FAIL,
+                details=timeout_msg,
+            )
+            for later in PIPELINE_STAGES[stage_idx + 1:]:
                 pipeline_report.record_step(
-                    ufid, stage.service, stage.description,
-                    StepStatus.FAIL,
+                    ufid, later.service, later.description,
+                    StepStatus.SKIPPED,
                     details=(
-                        f"Timed out after {stage.timeout_s}s waiting for "
-                        f"{expected_label}. {type(e).__name__}: {e}"
+                        f"Skipped — run force-killed after {stage.service} "
+                        f"timed out ({stage.timeout_s:.0f}s per-stage budget)."
                     ),
                 )
+            _attach_events_to_last_step(pipeline_report, event_listener, ufid)
+            pytest.fail(
+                f"Pipeline force-killed for {ufid}: {stage.service} stage "
+                f"exceeded its {stage.timeout_s:.0f}s budget. {timeout_msg}"
+            )
 
     # Fail the pytest run if the pipeline emitted a failure event, so CI
     # surfaces a red test in addition to the HTML report row.
     if event_listener.has_event(ufid, FAILURE_EVENT):
         failure_reason = _failure_reason(event_listener, ufid)
+        _attach_events_to_last_step(pipeline_report, event_listener, ufid)
         pytest.fail(
             f"Pipeline failed for {ufid}: {FAILURE_EVENT} received. "
             f"failure_reason: {failure_reason}"
         )
 
-    # Attach captured events to the last report step for visibility in the HTML.
+    _attach_events_to_last_step(pipeline_report, event_listener, ufid)
+
+
+def _attach_events_to_last_step(
+    pipeline_report: PipelineReport,
+    event_listener: "EventHubListener",
+    ufid: str,
+) -> None:
+    """Attach captured Event Hub events to the last report step so they
+    render in the HTML timeline, regardless of which code path finished
+    the stage loop (PASS, failure-event short-circuit, or force-kill)."""
     trace = pipeline_report._find_trace(ufid)
     if trace and trace.steps:
         trace.steps[-1].events = event_listener.events_for(ufid)

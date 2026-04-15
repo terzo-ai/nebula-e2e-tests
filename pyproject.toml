@@ -20,7 +20,7 @@ ui = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-timeout = 900
+timeout = 600
 markers = [
     "slow: marks tests that take >60s (OCR processing)",
 ]

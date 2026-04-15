@@ -16,9 +16,11 @@ execution, then renders a self-contained HTML report with:
 from __future__ import annotations
 
 import html
+import json
 import logging
 import math
 import pathlib
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -577,6 +579,69 @@ def _flow_node_html(
     )
 
 
+# --- Payload masking -------------------------------------------------------
+
+# Keys whose values should be fully redacted before being rendered into the
+# HTML report. Matched case-insensitively as substrings of the key name.
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"authorization|bearer|"
+    r"token|password|passwd|secret|"
+    r"api[_-]?key|client[_-]?secret|"
+    r"signature|connection[_-]?string|shared[_-]?access[_-]?key|"
+    r"cookie|xsrf|credit[_-]?card|\bssn\b",
+    re.IGNORECASE,
+)
+
+# Azure SAS query-string parameters. When a value is a URL, these params are
+# scrubbed individually so the rest of the URL is still readable.
+_SENSITIVE_URL_PARAMS = {
+    "sig", "sv", "se", "sp", "srt", "ss", "spr", "st",
+    "skoid", "sktid", "skt", "ske", "sks", "skv",
+}
+
+_REDACTED = "***REDACTED***"
+
+
+def _mask_url_params(url: str) -> str:
+    if "?" not in url:
+        return url
+    head, _, qs = url.partition("?")
+    masked_parts: list[str] = []
+    for part in qs.split("&"):
+        name, eq, value = part.partition("=")
+        if eq and value and name.lower() in _SENSITIVE_URL_PARAMS:
+            masked_parts.append(f"{name}=***")
+        else:
+            masked_parts.append(part)
+    return head + "?" + "&".join(masked_parts)
+
+
+def _mask_payload(value: Any, key: str = "") -> Any:
+    """Recursively redact values whose key matches a sensitive pattern.
+
+    Preserves structure so the rendered JSON stays readable.
+    """
+    if key and _SENSITIVE_KEY_PATTERN.search(key):
+        return _REDACTED
+    if isinstance(value, dict):
+        return {k: _mask_payload(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_payload(v, key) for v in value]
+    if isinstance(value, str):
+        return _mask_url_params(value)
+    return value
+
+
+def _payload_json_html(payload: Any) -> str:
+    """Render a masked payload as a collapsible <pre> block."""
+    try:
+        masked = _mask_payload(payload)
+        rendered = json.dumps(masked, indent=2, default=str, sort_keys=True)
+    except Exception as e:  # pragma: no cover — defensive
+        rendered = f"<could not render payload: {type(e).__name__}: {e}>"
+    return f'<pre class="payload-json">{_esc(rendered)}</pre>'
+
+
 def _doc_flow_graph_html(doc: DocumentTrace) -> str:
     """Render the horizontal stage flow for a single document."""
     parts: list[str] = []
@@ -606,19 +671,31 @@ def _render_html(report: PipelineReport) -> str:
         if events_for_doc:
             event_rows = ""
             for ev in events_for_doc:
+                short_doc_id = str(ev.document_id)[:8] if ev.document_id else "-"
+                payload_html = _payload_json_html(ev.payload)
                 event_rows += f"""
                 <tr>
                   <td><code>{_esc(str(ev.received_at))}</code></td>
                   <td><code>{_esc(str(ev.event_type))}</code></td>
+                  <td><code title="{_esc(str(ev.document_id))}">{_esc(short_doc_id)}</code></td>
                   <td>{_esc(str(ev.partition_id))}</td>
                   <td>{_esc(str(ev.sequence_number))}</td>
+                  <td class="events-payload-cell">
+                    <details class="payload-toggle">
+                      <summary>view</summary>
+                      {payload_html}
+                    </details>
+                  </td>
                 </tr>"""
             event_section = f"""
             <div class="event-timeline">
-              <h4>Event Hub Events</h4>
+              <h4>Event Hub Events
+                <span class="payload-note">(payloads auto-masked — secrets/SAS params redacted)</span>
+              </h4>
               <table class="events-table">
                 <thead><tr>
-                  <th>Received At</th><th>Event Type</th><th>Partition</th><th>Seq #</th>
+                  <th>Received At</th><th>Event Type</th><th>Doc ID</th>
+                  <th>Partition</th><th>Seq #</th><th>Payload</th>
                 </tr></thead>
                 <tbody>{event_rows}</tbody>
               </table>
@@ -628,10 +705,16 @@ def _render_html(report: PipelineReport) -> str:
         <div class="doc-section">
           <details open>
             <summary>
+              <span class="doc-ufid-chip" title="Universal File ID">UFID</span>
               <span class="doc-ufid">{_esc(doc.ufid)}</span>
               <span class="doc-filename">{_esc(doc.filename)}</span>
               {_status_badge(doc.overall_status)}
             </summary>
+            <div class="doc-ufid-banner">
+              <span class="doc-ufid-label">UFID</span>
+              <code class="doc-ufid-value">{_esc(doc.ufid)}</code>
+              <span class="doc-ufid-file">{_esc(doc.filename)}</span>
+            </div>
             {_doc_flow_graph_html(doc)}
             {event_section}
           </details>
@@ -847,8 +930,31 @@ def _render_html(report: PipelineReport) -> str:
     border-bottom: 1px solid var(--border);
   }}
   .doc-section summary:hover {{ background: var(--bg); }}
-  .doc-ufid {{ font-family: 'SF Mono', Consolas, monospace; font-size: 13px; color: var(--gray); }}
+  .doc-ufid-chip {{
+    background: #1e293b; color: #e5e7eb; font-size: 10px;
+    font-weight: 700; letter-spacing: 0.06em; padding: 2px 8px;
+    border-radius: 4px; text-transform: uppercase;
+  }}
+  .doc-ufid {{ font-family: 'SF Mono', Consolas, monospace; font-size: 13px; color: #1f2937; }}
   .doc-filename {{ font-weight: 600; }}
+  .doc-ufid-banner {{
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 20px; background: #f3f4f6;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }}
+  .doc-ufid-banner .doc-ufid-label {{
+    font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+    color: var(--gray); text-transform: uppercase;
+  }}
+  .doc-ufid-banner .doc-ufid-value {{
+    font-family: 'SF Mono', Consolas, monospace;
+    background: var(--card-bg); border: 1px solid var(--border);
+    padding: 3px 10px; border-radius: 4px; font-size: 12px;
+    color: #111827; user-select: all;
+  }}
+  .doc-ufid-banner .doc-ufid-file {{
+    color: var(--gray); font-size: 12px; margin-left: auto;
+  }}
 
   .flow-graph {{
     display: flex; align-items: stretch; gap: 4px;
@@ -929,7 +1035,27 @@ def _render_html(report: PipelineReport) -> str:
     font-size: 11px; text-transform: uppercase; color: var(--gray);
     border-bottom: 1px solid var(--border);
   }}
-  .events-table td {{ padding: 6px 10px; border-bottom: 1px solid var(--border); }}
+  .events-table td {{ padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }}
+  .events-payload-cell {{ width: 1%; white-space: nowrap; }}
+  .payload-note {{
+    font-weight: 400; text-transform: none; color: var(--gray);
+    font-size: 11px; margin-left: 6px; letter-spacing: 0;
+  }}
+  .payload-toggle > summary {{
+    cursor: pointer; font-size: 12px; color: #2563eb;
+    list-style: none; font-weight: 500;
+  }}
+  .payload-toggle > summary::-webkit-details-marker {{ display: none; }}
+  .payload-toggle > summary::before {{ content: "\u25B8 "; font-size: 10px; }}
+  .payload-toggle[open] > summary::before {{ content: "\u25BE "; }}
+  .payload-json {{
+    margin-top: 6px; padding: 10px 12px;
+    background: #0f172a; color: #e5e7eb;
+    border-radius: 6px; font-family: 'SF Mono', Consolas, monospace;
+    font-size: 11px; line-height: 1.5;
+    max-height: 320px; overflow: auto; white-space: pre-wrap;
+    word-break: break-word;
+  }}
   .errors-banner {{
     background: var(--fail-bg); border: 1px solid var(--fail);
     border-radius: 8px; padding: 16px 20px; margin-bottom: 24px;

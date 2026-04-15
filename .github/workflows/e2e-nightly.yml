@@ -27,7 +27,7 @@ jobs:
         run: uv sync
 
       - name: Run E2E tests
-        run: uv run pytest $TEST_PATH -v --timeout=900 --alluredir=allure-results
+        run: uv run pytest $TEST_PATH -v --timeout=600 --alluredir=allure-results
         env:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}

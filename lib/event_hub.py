@@ -56,12 +56,19 @@ class EventHubListener:
     caring which hub an event came from.
     """
 
+    # Default partition IDs to subscribe to. Azure Event Hub's "all partitions"
+    # receive mode (omitting partition_id) is broken in this environment — the
+    # portal shows the same bug in the "All partition IDs" dropdown option.
+    # We work around it by explicitly fanning out one receive task per partition.
+    DEFAULT_PARTITION_IDS: tuple[str, ...] = ("0", "1", "2", "3")
+
     def __init__(
         self,
         connection_string: str,
         event_hub_name: str | list[str],
         consumer_group: str = "probe-test",
         timeout: float = 120.0,
+        partition_ids: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self._connection_string = connection_string
         if isinstance(event_hub_name, str):
@@ -74,6 +81,11 @@ class EventHubListener:
         self._event_hub_names: list[str] = names
         self._consumer_group = consumer_group
         self._timeout = timeout
+        self._partition_ids: tuple[str, ...] = tuple(
+            partition_ids if partition_ids is not None else self.DEFAULT_PARTITION_IDS
+        )
+        if not self._partition_ids:
+            raise ValueError("partition_ids must contain at least one partition id")
         self._watched_ufids: set[str] = set()
         self._events: list[CapturedEvent] = []
         self._consumers: list[Any] = []
@@ -96,12 +108,18 @@ class EventHubListener:
                 eventhub_name=hub_name,
             )
             self._consumers.append(consumer)
-            self._receive_tasks.append(
-                asyncio.create_task(self._receive_loop(consumer, hub_name))
-            )
+            # Fan out one receive task per partition. The "all partitions"
+            # path (no partition_id) is unreliable — per-partition receivers
+            # are the supported workaround.
+            for partition_id in self._partition_ids:
+                self._receive_tasks.append(
+                    asyncio.create_task(
+                        self._receive_loop(consumer, hub_name, partition_id)
+                    )
+                )
             logger.info(
-                "Event Hub listener started: hub=%s group=%s",
-                hub_name, self._consumer_group,
+                "Event Hub listener started: hub=%s group=%s partitions=%s",
+                hub_name, self._consumer_group, ",".join(self._partition_ids),
             )
         return self
 
@@ -126,8 +144,10 @@ class EventHubListener:
             len(self._events), len(self._event_hub_names),
         )
 
-    async def _receive_loop(self, consumer: Any, hub_name: str) -> None:
-        """Background task: receive events from all partitions of one hub."""
+    async def _receive_loop(
+        self, consumer: Any, hub_name: str, partition_id: str
+    ) -> None:
+        """Background task: receive events from a single partition of one hub."""
         async def on_event(partition_context, event):
             if event is None:
                 return
@@ -175,12 +195,16 @@ class EventHubListener:
         try:
             await consumer.receive(
                 on_event=on_event,
+                partition_id=partition_id,
                 starting_position="@latest",
             )
         except asyncio.CancelledError:
             pass
         except Exception:
-            logger.exception("Event Hub receive loop error (hub=%s)", hub_name)
+            logger.exception(
+                "Event Hub receive loop error (hub=%s partition=%s)",
+                hub_name, partition_id,
+            )
 
     def watch(self, ufid: str) -> None:
         """Register a document ID to capture events for."""

@@ -77,7 +77,7 @@ class DocumentServiceClient:
         self._tenant_id = tenant_id
         headers = {"X-Tenant-Id": str(self._tenant_id)}
         if access_token:
-            headers["access-token"] = access_token
+            headers["Authorization"] = f"Bearer {access_token}"
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers=headers,

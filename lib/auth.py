@@ -10,7 +10,7 @@ async def fetch_access_token(config: E2EConfig) -> str:
     Headers: X-Access-Token: {auth_service_key}
     Body: {"userId": ..., "email": ..., "tenantId": ..., "grantType": "session_token"}
 
-    Returns the access token string for use in the `access-token` header.
+    Returns the access token string for use in the `Authorization: Bearer` header.
     """
     async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
         resp = await client.post(

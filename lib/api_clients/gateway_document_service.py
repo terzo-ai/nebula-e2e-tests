@@ -130,5 +130,29 @@ class GatewayDocumentServiceClient:
         resp = await self._client.post(
             f"{self.SERVICE_PREFIX}/documents/bulk-upload", json=payload
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # Include the server's response body and relevant headers in the
+            # exception so failures are self-diagnostic (auth scheme mismatches,
+            # expired tokens, etc. typically put the reason in the body or in
+            # WWW-Authenticate / x-error / x-request-id headers).
+            debug_headers = {
+                k: v for k, v in resp.headers.items()
+                if k.lower() in {
+                    "www-authenticate", "x-error", "x-request-id",
+                    "x-amzn-requestid", "x-trace-id", "content-type",
+                }
+            }
+            body_snippet = resp.text[:2000] if resp.text else "(empty body)"
+            auth_sent = self._client.headers.get("Authorization", "(none)")
+            auth_preview = (
+                auth_sent[:12] + "..." + auth_sent[-6:]
+                if len(auth_sent) > 24 else "(short/none)"
+            )
+            raise RuntimeError(
+                f"bulk-upload failed: {resp.status_code} {resp.reason_phrase}\n"
+                f"  url: {resp.request.url}\n"
+                f"  sent Authorization header: {auth_preview}\n"
+                f"  response headers: {debug_headers}\n"
+                f"  response body: {body_snippet}"
+            )
         return BulkUploadResponse.from_json(resp.json())

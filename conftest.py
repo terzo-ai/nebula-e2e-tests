@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from lib.api_clients.document_service import DocumentServiceClient
+from lib.api_clients.gateway_document_service import GatewayDocumentServiceClient
 from lib.auth import fetch_access_token
 from lib.config import E2EConfig
 from lib.fixtures import FixtureFile, load_test_files
@@ -99,6 +100,20 @@ def pipeline_report(config: E2EConfig, run_ctx: RunContext):
 async def doc_client(config: E2EConfig, access_token: str) -> DocumentServiceClient:
     client = DocumentServiceClient(
         base_url=config.base_url,
+        tenant_id=config.tenant_id,
+        access_token=access_token,
+    )
+    yield client
+    await client.close()
+
+
+@pytest.fixture
+async def gateway_doc_client(
+    config: E2EConfig, access_token: str
+) -> GatewayDocumentServiceClient:
+    """Client targeting document-service via the terzoai-gateway (for bulk-upload etc.)."""
+    client = GatewayDocumentServiceClient(
+        base_url=config.gateway_base_url,
         tenant_id=config.tenant_id,
         access_token=access_token,
     )

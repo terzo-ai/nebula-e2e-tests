@@ -99,7 +99,7 @@ Two end-to-end paths against the Nebula gateway (`https://terzoai-gateway-dev.te
   │   OCR Service    │   Extraction Service     Ingestion Service │      │
   │        │         │         │                       │          │      │
   │        ├──ocr.completed ──►│                       │          │      │
-  │        │                   ├─ extraction.completed─►          │      │
+  │        │                   ├─auto_extraction.completed─►      │      │
   │        │                   │                       ├──ingestion.completed
   │        │                                                                
   └──────────────────────────────────────────────────────────────────────┘
@@ -109,14 +109,12 @@ Two end-to-end paths against the Nebula gateway (`https://terzoai-gateway-dev.te
        │   Each captured event becomes a row in the HTML pipeline report.
        │
        │   Tracked event types (per docs/EVENT_TYPES.md):
-       │     com.terzo.document.uploaded
-       │     com.terzo.document.ocr.queued
+       │     com.terzo.document.uploaded                      (Event Hub stage uses the
+       │                                                       first event — typically this)
        │     com.terzo.document.ocr.completed
-       │     com.terzo.document.extraction.queued
-       │     com.terzo.document.extraction.completed
-       │     com.terzo.document.ingestion.queued
+       │     com.terzo.document.auto_extraction.completed
        │     com.terzo.document.ingestion.completed
-       │     com.terzo.document.failed   (negative assertion)
+       │     com.terzo.document.failed   (short-circuits remaining stages to FAIL)
 ```
 
 ### Legacy presigned-upload path
@@ -350,19 +348,21 @@ Parametrized test that runs with **3, 5, and 10 files** uploaded concurrently.
 
 The primary daily-run test. Submits one bulk-upload item, then watches Event Hub for the full pipeline progression.
 
-| Step | Service | Event / API call | Timeout |
-|------|---------|------------------|---------|
-| 01 | **Document Service** | `POST /api/v1/documents/bulk-upload` → 202, ufid extracted | — |
-| 02 | **Document Service** | `com.terzo.document.uploaded` (worker-pod download complete) | 300s |
-| 03 | **OCR Service** | `com.terzo.document.ocr.queued` | 30s |
-| 04 | **OCR Service** | `com.terzo.document.ocr.completed` | 300s |
-| 05 | **Extraction Service** | `com.terzo.document.extraction.queued` | 30s |
-| 06 | **Extraction Service** | `com.terzo.document.extraction.completed` | 300s |
-| 07 | **Ingestion Service** | `com.terzo.document.ingestion.queued` | 30s |
-| 08 | **Ingestion Service** | `com.terzo.document.ingestion.completed` | 300s |
-| 09 | **Event Hub** | Negative assertion: no `com.terzo.document.failed` observed | — |
+| Step | Service | Event / API call | Per-stage timeout |
+|------|---------|------------------|-------------------|
+| 01 | **Document Service** | `POST /api/v1/documents/bulk-upload` → HTTP 202, ufid extracted | — |
+| 02 | **Event Hub** | First event captured for the ufid (proves listener wiring) | 600s |
+| 03 | **OCR Service** | `com.terzo.document.ocr.completed` | 600s |
+| 04 | **Extraction Service** | `com.terzo.document.auto_extraction.completed` | 600s |
+| 05 | **Ingestion Service** | `com.terzo.document.ingestion.completed` | 600s |
 
-Each step becomes a row in `reports/pipeline-<run-id>.html` with PASS / FAIL / SKIPPED status. If `com.terzo.document.failed` fires for the ufid, remaining steps are marked FAIL with the `failure_reason` payload field, and the test fails. If `E2E_EVENT_HUB_CONNECTION_STRING` is unset, steps 02-09 are recorded SKIPPED and the test calls `pytest.skip()` so the daily run doesn't fail on missing infra.
+Each step becomes a row in `reports/pipeline-<run-id>.html` with PASS / FAIL / SKIPPED status.
+
+**Per-stage timeout semantics.** Each stage has its own 10-minute wall-clock budget that resets on stage entry — a slow OCR stage does not eat into the Extraction or Ingestion budget. If a stage's expected event does not arrive within 600s, the test **force-kills**: that stage is recorded FAIL, all downstream stages are recorded SKIPPED, and `pytest.fail()` aborts immediately so the run can never hang past ~10 minutes on a single stage.
+
+**Failure event.** If `com.terzo.document.failed` fires for the ufid at any point, remaining steps are recorded FAIL with the `failure_reason` payload field and the test fails.
+
+**Event Hub not configured.** If `E2E_EVENT_HUB_CONNECTION_STRING` is unset, steps 02-05 are recorded SKIPPED and the test calls `pytest.skip()` so the daily run doesn't fail on missing infra.
 
 ---
 
@@ -498,14 +498,14 @@ All configuration is via environment variables (prefix `E2E_`) or a `.env` file.
 | `E2E_AUTH_USER_ID` | `1000129` | User ID claim |
 | `E2E_AUTH_EMAIL` | `paventhan@terzocloud.com` | Email claim |
 
-### Event Hub (optional — enables the 7-event pipeline verification)
+### Event Hub (optional — enables the 4-stage pipeline verification)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `E2E_EVENT_HUB_CONNECTION_STRING` | — | Namespace-scoped SAS connection string (secret). When unset, the bulk-upload test skips event verification. |
-| `E2E_EVENT_HUB_NAME` | — | Comma-separated list of child hub names. The listener fans out to each. |
-| `E2E_EVENT_HUB_CONSUMER_GROUP` | `probe-test` | Consumer group |
-| `E2E_EVENT_HUB_LISTEN_TIMEOUT` | `120.0` | Default per-event wait timeout |
+| `E2E_EVENT_HUB_NAME` | `terzo-ai-contract-document-events` | Comma-separated list of child hub names. The listener fans out to each. Default matches `OCRM_EVENTHUB_NAME`. |
+| `E2E_EVENT_HUB_CONSUMER_GROUP` | `terzo-ai-extraction-platform` | Consumer group. Default matches `OCRM_EVENTHUB_CONSUMER_GROUP`. |
+| `E2E_EVENT_HUB_LISTEN_TIMEOUT` | `120.0` | Default per-event wait timeout (overridden to 600s per stage by the bulk-upload test). |
 
 ### Fixtures (legacy presigned-upload tests only)
 

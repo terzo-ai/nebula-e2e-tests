@@ -7,7 +7,7 @@ PASS/FAIL pipeline-report row for each stage:
     1. Document Service : PASS on HTTP 202 + ufid returned
     2. Event Hub        : PASS on first event captured for the ufid
     3. OCR Service      : PASS on com.terzo.document.ocr.completed
-    4. Extraction Service: PASS on com.terzo.document.extraction.completed
+    4. Extraction Service: PASS on com.terzo.document.auto_extraction.completed
     5. Ingestion Service : PASS on com.terzo.document.ingestion.completed
 
 Each stage has its own independent 10-minute timeout that starts when
@@ -84,7 +84,7 @@ PIPELINE_STAGES: list[PipelineStage] = [
     PipelineStage(
         service="Extraction Service",
         description="AI Extraction completed",
-        event_type="com.terzo.document.extraction.completed",
+        event_type="com.terzo.document.auto_extraction.completed",
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(

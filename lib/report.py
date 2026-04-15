@@ -1,13 +1,26 @@
 """HTML pipeline report: generates a standalone report showing pipeline progression.
 
-Collects per-document step results during test execution and renders a self-contained
-HTML report with status table, event timeline, and timing information.
+Collects per-document step results, session logs, and session errors during test
+execution, then renders a self-contained HTML report with:
+
+  * Header banner + run metadata
+  * Summary stats (documents / steps / pass rate)
+  * Dashboards — status donut, per-stage pass/fail bars, per-document duration bars
+  * Captured log stream (collapsible, color-coded by level)
+  * Errors banner
+  * Pipeline flow graph per document:
+      Document Service (uploaded/failed) → Event Hub → OCR → AI Extraction → Ingestion
+    Stages downstream of Document Service derive their status from Event Hub events.
 """
 
 from __future__ import annotations
 
+import html
+import logging
+import math
 import pathlib
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -71,6 +84,14 @@ class DocumentTrace:
         return None
 
 
+@dataclass
+class LogEntry:
+    timestamp: str       # ISO-8601 wall clock
+    level: str           # INFO / WARNING / ERROR / ...
+    logger_name: str
+    message: str
+
+
 class PipelineReport:
     """Collects pipeline step results and generates an HTML report."""
 
@@ -89,6 +110,7 @@ class PipelineReport:
         self.documents: list[DocumentTrace] = []
         self._step_counter: dict[str, int] = {}
         self.errors: list[str] = []
+        self.logs: list[LogEntry] = []
 
     def add_document(self, ufid: str, filename: str) -> DocumentTrace:
         trace = DocumentTrace(ufid=ufid, filename=filename)
@@ -127,6 +149,36 @@ class PipelineReport:
         """Record a session-level error (e.g., auth failure, config issue)."""
         self.errors.append(message)
 
+    def record_log(self, level: str, logger_name: str, message: str) -> None:
+        """Record a log line. Bounded at 2000 entries to keep the HTML small."""
+        if len(self.logs) >= 2000:
+            return
+        self.logs.append(
+            LogEntry(
+                timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                level=level.upper(),
+                logger_name=logger_name,
+                message=message,
+            )
+        )
+
+    def install_log_handler(
+        self,
+        level: int = logging.INFO,
+        logger: logging.Logger | None = None,
+    ) -> ReportLogHandler:
+        """Attach a logging handler that streams records into `self.logs`.
+
+        Returns the handler so the caller can detach it at teardown.
+        """
+        handler = ReportLogHandler(self, level=level)
+        target = logger if logger is not None else logging.getLogger()
+        target.addHandler(handler)
+        # Don't lower the logger's own level if it's already permissive.
+        if target.level == logging.NOTSET or target.level > level:
+            target.setLevel(level)
+        return handler
+
     def finalize(self) -> None:
         self.ended_at = datetime.now(timezone.utc).isoformat()
         for doc in self.documents:
@@ -155,9 +207,24 @@ class PipelineReport:
     def save(self, path: str | pathlib.Path) -> pathlib.Path:
         path = pathlib.Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        html = self.render_html()
-        path.write_text(html, encoding="utf-8")
+        html_str = self.render_html()
+        path.write_text(html_str, encoding="utf-8")
         return path
+
+
+class ReportLogHandler(logging.Handler):
+    """Logging handler that appends formatted records to a PipelineReport."""
+
+    def __init__(self, report: PipelineReport, level: int = logging.INFO) -> None:
+        super().__init__(level=level)
+        self._report = report
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+        except Exception:
+            msg = record.getMessage()
+        self._report.record_log(record.levelname, record.name, msg)
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +234,22 @@ class PipelineReport:
 _STATUS_COLORS = {
     StepStatus.PASS: ("#16a34a", "#dcfce7", "#166534"),       # green
     StepStatus.FAIL: ("#dc2626", "#fee2e2", "#991b1b"),       # red
-    StepStatus.PARTIAL: ("#ea580c", "#ffedd5", "#9a3412"),     # orange
-    StepStatus.SKIPPED: ("#6b7280", "#f3f4f6", "#374151"),     # gray
-    StepStatus.PENDING: ("#6b7280", "#f3f4f6", "#374151"),     # gray
+    StepStatus.PARTIAL: ("#ea580c", "#ffedd5", "#9a3412"),    # orange
+    StepStatus.SKIPPED: ("#6b7280", "#f3f4f6", "#374151"),    # gray
+    StepStatus.PENDING: ("#6b7280", "#f3f4f6", "#374151"),    # gray
 }
+
+_LOG_LEVEL_COLORS = {
+    "DEBUG":    "#6b7280",
+    "INFO":     "#2563eb",
+    "WARNING":  "#ea580c",
+    "ERROR":    "#dc2626",
+    "CRITICAL": "#7f1d1d",
+}
+
+
+def _esc(s: str) -> str:
+    return html.escape(s, quote=False)
 
 
 def _status_badge(status: StepStatus) -> str:
@@ -193,57 +272,335 @@ def _fmt_duration(seconds: float | None) -> str:
     return f"{mins}m {secs:.0f}s"
 
 
+# --- Dashboard builders ----------------------------------------------------
+
+
+def _doc_status_counts(report: PipelineReport) -> dict[StepStatus, int]:
+    counts: dict[StepStatus, int] = defaultdict(int)
+    for doc in report.documents:
+        counts[doc.overall_status] += 1
+    return counts
+
+
+def _step_status_counts(report: PipelineReport) -> dict[StepStatus, int]:
+    counts: dict[StepStatus, int] = defaultdict(int)
+    for doc in report.documents:
+        for step in doc.steps:
+            counts[step.status] += 1
+    return counts
+
+
+def _per_service_counts(
+    report: PipelineReport,
+) -> list[tuple[str, dict[StepStatus, int]]]:
+    """List of (service, status->count), preserving first-seen order."""
+    order: list[str] = []
+    buckets: dict[str, dict[StepStatus, int]] = {}
+    for doc in report.documents:
+        for step in doc.steps:
+            if step.service not in buckets:
+                buckets[step.service] = defaultdict(int)
+                order.append(step.service)
+            buckets[step.service][step.status] += 1
+    return [(svc, buckets[svc]) for svc in order]
+
+
+def _donut_svg(counts: dict[StepStatus, int], size: int = 180) -> str:
+    """A CSS/SVG donut chart showing status distribution."""
+    total = sum(counts.values())
+    if total == 0:
+        return (
+            f'<svg class="donut" viewBox="0 0 {size} {size}" width="{size}" height="{size}">'
+            f'<circle cx="{size/2}" cy="{size/2}" r="{size/2 - 20}" '
+            f'fill="none" stroke="#e5e7eb" stroke-width="22"/></svg>'
+        )
+
+    radius = size / 2 - 20
+    circumference = 2 * math.pi * radius
+    segments: list[str] = []
+    offset = 0.0
+    # Order the ring: PASS, PARTIAL, FAIL, SKIPPED, PENDING.
+    order = [StepStatus.PASS, StepStatus.PARTIAL, StepStatus.FAIL,
+             StepStatus.SKIPPED, StepStatus.PENDING]
+    for status in order:
+        n = counts.get(status, 0)
+        if n == 0:
+            continue
+        frac = n / total
+        length = frac * circumference
+        color, _, _ = _STATUS_COLORS[status]
+        segments.append(
+            f'<circle cx="{size/2}" cy="{size/2}" r="{radius}" fill="none" '
+            f'stroke="{color}" stroke-width="22" '
+            f'stroke-dasharray="{length:.3f} {circumference - length:.3f}" '
+            f'stroke-dashoffset="{-offset:.3f}" '
+            f'transform="rotate(-90 {size/2} {size/2})"/>'
+        )
+        offset += length
+
+    center_label = f"{total}"
+    center_sub = "docs" if total != 1 else "doc"
+
+    return (
+        f'<svg class="donut" viewBox="0 0 {size} {size}" width="{size}" height="{size}">'
+        f'<circle cx="{size/2}" cy="{size/2}" r="{radius}" fill="none" '
+        f'stroke="#f3f4f6" stroke-width="22"/>'
+        + "".join(segments) +
+        f'<text x="{size/2}" y="{size/2 - 2}" text-anchor="middle" '
+        f'class="donut-num">{center_label}</text>'
+        f'<text x="{size/2}" y="{size/2 + 18}" text-anchor="middle" '
+        f'class="donut-sub">{center_sub}</text>'
+        f'</svg>'
+    )
+
+
+def _donut_legend(counts: dict[StepStatus, int]) -> str:
+    items: list[str] = []
+    for status in [StepStatus.PASS, StepStatus.PARTIAL, StepStatus.FAIL,
+                   StepStatus.SKIPPED, StepStatus.PENDING]:
+        n = counts.get(status, 0)
+        if n == 0:
+            continue
+        color, _, _ = _STATUS_COLORS[status]
+        items.append(
+            f'<li><span class="dot" style="background:{color}"></span>'
+            f'{status.value}<span class="legend-num">{n}</span></li>'
+        )
+    if not items:
+        items.append('<li><span class="dot" style="background:#e5e7eb"></span>No data</li>')
+    return '<ul class="legend">' + "".join(items) + '</ul>'
+
+
+def _stage_bars_html(report: PipelineReport) -> str:
+    """Stacked horizontal bars showing pass/partial/fail counts per service."""
+    services = _per_service_counts(report)
+    if not services:
+        return '<div class="chart-empty">No pipeline steps recorded yet.</div>'
+
+    max_total = max(sum(b.values()) for _, b in services) or 1
+    rows: list[str] = []
+    for service, bucket in services:
+        total = sum(bucket.values())
+        pass_n = bucket.get(StepStatus.PASS, 0)
+        partial_n = bucket.get(StepStatus.PARTIAL, 0)
+        fail_n = bucket.get(StepStatus.FAIL, 0)
+        skipped_n = bucket.get(StepStatus.SKIPPED, 0)
+        pending_n = bucket.get(StepStatus.PENDING, 0)
+
+        # Width of the whole row's filled portion proportional to max_total.
+        row_scale = total / max_total
+        def seg(n: int, status: StepStatus) -> str:
+            if n == 0:
+                return ""
+            pct = (n / total) * 100 * row_scale
+            color, _, _ = _STATUS_COLORS[status]
+            return (
+                f'<span class="bar-seg" style="width:{pct:.2f}%;background:{color}" '
+                f'title="{status.value}: {n}"></span>'
+            )
+
+        bar = (
+            seg(pass_n, StepStatus.PASS)
+            + seg(partial_n, StepStatus.PARTIAL)
+            + seg(fail_n, StepStatus.FAIL)
+            + seg(skipped_n, StepStatus.SKIPPED)
+            + seg(pending_n, StepStatus.PENDING)
+        )
+        pass_rate = (pass_n / total * 100) if total else 0
+        rows.append(
+            f'<div class="chart-row">'
+            f'<div class="chart-label" title="{_esc(service)}">{_esc(service)}</div>'
+            f'<div class="chart-bar">{bar}</div>'
+            f'<div class="chart-value">{pass_n}/{total}'
+            f'<span class="chart-subvalue">{pass_rate:.0f}% pass</span></div>'
+            f'</div>'
+        )
+    return '<div class="chart">' + "".join(rows) + '</div>'
+
+
+def _doc_duration_bars_html(report: PipelineReport) -> str:
+    """Horizontal bars showing total duration per document."""
+    rows_data = [
+        (doc, doc.total_duration_s or 0.0) for doc in report.documents
+    ]
+    if not rows_data:
+        return '<div class="chart-empty">No documents recorded yet.</div>'
+
+    max_dur = max(d for _, d in rows_data) or 1.0
+    rows: list[str] = []
+    for doc, dur in rows_data:
+        pct = (dur / max_dur) * 100 if max_dur else 0
+        color, _, _ = _STATUS_COLORS[doc.overall_status]
+        short_ufid = doc.ufid[:8]
+        label = f"{short_ufid} · {doc.filename}"
+        rows.append(
+            f'<div class="chart-row">'
+            f'<div class="chart-label" title="{_esc(doc.ufid)}">{_esc(label)}</div>'
+            f'<div class="chart-bar">'
+            f'<span class="bar-seg" style="width:{pct:.2f}%;background:{color}"></span>'
+            f'</div>'
+            f'<div class="chart-value">{_fmt_duration(dur if dur else None)}</div>'
+            f'</div>'
+        )
+    return '<div class="chart">' + "".join(rows) + '</div>'
+
+
+def _logs_html(report: PipelineReport) -> str:
+    if not report.logs:
+        return (
+            '<details class="logs-panel">'
+            '<summary>Session Logs <span class="panel-count">0</span></summary>'
+            '<div class="logs-empty">No log records captured during this run.</div>'
+            '</details>'
+        )
+    by_level: dict[str, int] = defaultdict(int)
+    for log in report.logs:
+        by_level[log.level] += 1
+
+    chips = "".join(
+        f'<span class="log-chip" style="color:{_LOG_LEVEL_COLORS.get(lvl, "#6b7280")}">'
+        f'{lvl} · {by_level[lvl]}</span>'
+        for lvl in ("ERROR", "WARNING", "INFO", "DEBUG") if by_level.get(lvl)
+    )
+
+    rows: list[str] = []
+    for log in report.logs:
+        color = _LOG_LEVEL_COLORS.get(log.level, "#6b7280")
+        rows.append(
+            f'<div class="log-row">'
+            f'<span class="log-ts">{_esc(log.timestamp)}</span>'
+            f'<span class="log-level" style="color:{color}">{_esc(log.level)}</span>'
+            f'<span class="log-name">{_esc(log.logger_name)}</span>'
+            f'<span class="log-msg">{_esc(log.message)}</span>'
+            f'</div>'
+        )
+    body = '<div class="logs-body">' + "".join(rows) + '</div>'
+    return (
+        '<details class="logs-panel" open>'
+        f'<summary>Session Logs <span class="panel-count">{len(report.logs)}</span>'
+        f'<span class="log-chips">{chips}</span></summary>'
+        + body +
+        '</details>'
+    )
+
+
+# --- Pipeline flow graph ---------------------------------------------------
+
+# Stages in the pipeline flow graph, left to right. Each stage aggregates steps
+# whose `service` matches any of the listed names. Stages after Document Service
+# are driven entirely by Event Hub events captured during the run.
+_FLOW_STAGES: list[tuple[str, tuple[str, ...]]] = [
+    ("Document Service", ("Document Service", "UI / Drive")),
+    ("Event Hub",        ("Event Hub",)),
+    ("OCR",              ("OCR Service", "OCR Service / Event Hub")),
+    ("AI Extraction",    ("Extraction Service",)),
+    ("Ingestion",        ("Ingestion Service",)),
+]
+
+_FLOW_ICONS: dict[StepStatus, str] = {
+    StepStatus.PASS:    "\u2713",  # ✓
+    StepStatus.FAIL:    "\u2717",  # ✗
+    StepStatus.PARTIAL: "!",
+    StepStatus.SKIPPED: "\u2014",  # —
+    StepStatus.PENDING: "\u2026",  # …
+}
+
+
+def _aggregate_status(steps: list[PipelineStep]) -> StepStatus:
+    if not steps:
+        return StepStatus.PENDING
+    statuses = {s.status for s in steps}
+    if StepStatus.FAIL in statuses:
+        return StepStatus.FAIL
+    if StepStatus.PARTIAL in statuses or StepStatus.PENDING in statuses:
+        return StepStatus.PARTIAL
+    if statuses == {StepStatus.SKIPPED}:
+        return StepStatus.SKIPPED
+    return StepStatus.PASS
+
+
+def _stage_substatus(
+    stage_name: str, steps: list[PipelineStep], status: StepStatus
+) -> str:
+    """Short human-readable label shown under the stage name."""
+    if not steps:
+        return "not run"
+    if status == StepStatus.FAIL:
+        return "failed"
+    if status == StepStatus.SKIPPED:
+        return "skipped"
+    if status in (StepStatus.PARTIAL, StepStatus.PENDING):
+        return "partial"
+    if stage_name == "Document Service":
+        return "uploaded"
+    if stage_name == "Event Hub":
+        return "no failures"
+    return "completed"
+
+
+def _flow_node_html(
+    stage_name: str, steps: list[PipelineStep], status: StepStatus
+) -> str:
+    color, bg, fg = _STATUS_COLORS[status]
+    icon = _FLOW_ICONS[status]
+    substatus = _stage_substatus(stage_name, steps, status)
+
+    if steps:
+        items: list[str] = []
+        for step in steps:
+            step_color, _, _ = _STATUS_COLORS[step.status]
+            details_suffix = f" — {_esc(step.details)}" if step.details else ""
+            items.append(
+                f'<li><span class="flow-detail-status" style="color:{step_color}">'
+                f'{step.status.value}</span> {_esc(step.description)}{details_suffix}</li>'
+            )
+        details_body = '<ul class="flow-details">' + "".join(items) + '</ul>'
+    else:
+        details_body = (
+            '<div class="flow-details-empty">No steps recorded for this stage.</div>'
+        )
+
+    count = len(steps)
+    summary_label = f"{count} step" + ("s" if count != 1 else "")
+
+    return (
+        f'<div class="flow-node flow-node-{status.value.lower()}">'
+        f'<div class="flow-node-icon" style="color:{color};border-color:{color};">{icon}</div>'
+        f'<div class="flow-node-name">{_esc(stage_name)}</div>'
+        f'<div class="flow-node-status" style="color:{fg};background:{bg};">'
+        f'{status.value} &middot; {_esc(substatus)}</div>'
+        f'<details class="flow-node-details">'
+        f'<summary>{summary_label}</summary>'
+        f'{details_body}'
+        f'</details>'
+        f'</div>'
+    )
+
+
+def _doc_flow_graph_html(doc: DocumentTrace) -> str:
+    """Render the horizontal stage flow for a single document."""
+    parts: list[str] = []
+    for idx, (stage_name, services) in enumerate(_FLOW_STAGES):
+        matching = [s for s in doc.steps if s.service in services]
+        status = _aggregate_status(matching)
+        parts.append(_flow_node_html(stage_name, matching, status))
+        if idx < len(_FLOW_STAGES) - 1:
+            parts.append('<div class="flow-arrow" aria-hidden="true">&rarr;</div>')
+    return '<div class="flow-graph">' + "".join(parts) + '</div>'
+
+
+# --- Main render -----------------------------------------------------------
+
+
 def _render_html(report: PipelineReport) -> str:
     overall = report.overall_status
     banner_bg, _, banner_fg = _STATUS_COLORS[overall]
 
-    doc_rows = ""
-    for doc in report.documents:
-        dur = _fmt_duration(doc.total_duration_s)
-        doc_rows += f"""
-        <tr>
-          <td>{doc.ufid[:12]}...</td>
-          <td>{doc.filename}</td>
-          <td>{_status_badge(doc.overall_status)}</td>
-          <td>{dur}</td>
-        </tr>"""
-
     detail_sections = ""
     for doc in report.documents:
-        step_rows = ""
-        for step in doc.steps:
-            dur = _fmt_duration(step.duration_s)
-            details_cell = step.details if step.details else ""
-            # Build detail items
-            detail_items = []
-            if step.details:
-                for line in step.details.split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if line.startswith("\u2713") or line.startswith("\u2714"):
-                        detail_items.append(f'<div class="detail-pass">{line}</div>')
-                    elif line.startswith("\u2717") or line.startswith("\u00d7") or line.startswith("\u0394"):
-                        detail_items.append(f'<div class="detail-fail">{line}</div>')
-                    elif line.startswith("\u26a0"):
-                        detail_items.append(f'<div class="detail-warn">{line}</div>')
-                    else:
-                        detail_items.append(f"<div>{line}</div>")
-            details_html = "\n".join(detail_items) if detail_items else ""
-
-            step_rows += f"""
-            <tr>
-              <td class="step-num">{step.step_number:02d}</td>
-              <td>
-                <div class="step-service"><strong>{step.service}</strong></div>
-              </td>
-              <td class="step-details">{details_html}</td>
-              <td class="step-status">{_status_badge(step.status)}</td>
-            </tr>"""
-
-        # Event timeline
+        # Event timeline (captured events are attached to the last step in bulk-upload)
         event_section = ""
-        events_for_doc = []
+        events_for_doc: list[Any] = []
         for step in doc.steps:
             events_for_doc.extend(step.events)
         if events_for_doc:
@@ -251,10 +608,10 @@ def _render_html(report: PipelineReport) -> str:
             for ev in events_for_doc:
                 event_rows += f"""
                 <tr>
-                  <td><code>{ev.received_at}</code></td>
-                  <td><code>{ev.event_type}</code></td>
-                  <td>{ev.partition_id}</td>
-                  <td>{ev.sequence_number}</td>
+                  <td><code>{_esc(str(ev.received_at))}</code></td>
+                  <td><code>{_esc(str(ev.event_type))}</code></td>
+                  <td>{_esc(str(ev.partition_id))}</td>
+                  <td>{_esc(str(ev.sequence_number))}</td>
                 </tr>"""
             event_section = f"""
             <div class="event-timeline">
@@ -267,39 +624,43 @@ def _render_html(report: PipelineReport) -> str:
               </table>
             </div>"""
 
-        doc_status_bg, _, _ = _STATUS_COLORS[doc.overall_status]
         detail_sections += f"""
         <div class="doc-section">
           <details open>
             <summary>
-              <span class="doc-ufid">{doc.ufid}</span>
-              <span class="doc-filename">{doc.filename}</span>
+              <span class="doc-ufid">{_esc(doc.ufid)}</span>
+              <span class="doc-filename">{_esc(doc.filename)}</span>
               {_status_badge(doc.overall_status)}
             </summary>
-            <table class="pipeline-table">
-              <thead>
-                <tr>
-                  <th class="col-num">#</th>
-                  <th class="col-service">Step / Service</th>
-                  <th class="col-details">Details</th>
-                  <th class="col-status">Status</th>
-                </tr>
-              </thead>
-              <tbody>{step_rows}</tbody>
-            </table>
+            {_doc_flow_graph_html(doc)}
             {event_section}
           </details>
         </div>"""
 
     total_docs = len(report.documents)
-    passed = sum(1 for d in report.documents if d.overall_status == StepStatus.PASS)
-    failed = sum(1 for d in report.documents if d.overall_status == StepStatus.FAIL)
+    doc_counts = _doc_status_counts(report)
+    passed = doc_counts.get(StepStatus.PASS, 0)
+    failed = doc_counts.get(StepStatus.FAIL, 0)
+    partial = doc_counts.get(StepStatus.PARTIAL, 0)
 
-    # Errors section
+    step_counts = _step_status_counts(report)
+    total_steps = sum(step_counts.values())
+    steps_passed = step_counts.get(StepStatus.PASS, 0)
+    steps_failed = step_counts.get(StepStatus.FAIL, 0)
+    step_pass_rate = (steps_passed / total_steps * 100) if total_steps else 0.0
+
+    # Session duration (wall clock, not step durations).
+    try:
+        start_dt = datetime.fromisoformat(report.started_at)
+        end_dt = datetime.fromisoformat(report.ended_at) if report.ended_at else None
+        wall_duration_s = (end_dt - start_dt).total_seconds() if end_dt else None
+    except Exception:
+        wall_duration_s = None
+
     errors_section = ""
     if report.errors:
         error_items = "\n".join(
-            f'<div class="error-item">{e}</div>' for e in report.errors
+            f'<div class="error-item">{_esc(e)}</div>' for e in report.errors
         )
         errors_section = f"""
     <div class="errors-banner">
@@ -307,7 +668,6 @@ def _render_html(report: PipelineReport) -> str:
       {error_items}
     </div>"""
 
-    # Empty state
     empty_state = ""
     if not report.documents and not report.errors:
         empty_state = """
@@ -318,12 +678,18 @@ def _render_html(report: PipelineReport) -> str:
       Check the pytest output for details.</div>
     </div>"""
 
+    donut_svg = _donut_svg(doc_counts)
+    donut_legend = _donut_legend(doc_counts)
+    stage_bars = _stage_bars_html(report)
+    duration_bars = _doc_duration_bars_html(report)
+    logs_section = _logs_html(report)
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pipeline Report - {report.run_id}</title>
+<title>Pipeline Report - {_esc(report.run_id)}</title>
 <style>
   :root {{
     --pass: #16a34a; --pass-bg: #dcfce7;
@@ -345,31 +711,131 @@ def _render_html(report: PipelineReport) -> str:
   }}
   .banner h1 {{ font-size: 20px; font-weight: 600; }}
   .banner .status-text {{ font-size: 14px; opacity: 0.9; }}
-  .container {{ max-width: 1100px; margin: 0 auto; padding: 24px; }}
+  .container {{ max-width: 1200px; margin: 0 auto; padding: 24px; }}
+
   .meta-grid {{
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 12px; margin-bottom: 24px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px; margin-bottom: 20px;
   }}
   .meta-card {{
     background: var(--card-bg); border: 1px solid var(--border);
     border-radius: 8px; padding: 12px 16px;
   }}
   .meta-card .label {{ font-size: 11px; text-transform: uppercase; color: var(--gray); letter-spacing: 0.05em; }}
-  .meta-card .value {{ font-size: 14px; font-weight: 600; margin-top: 2px; }}
+  .meta-card .value {{ font-size: 14px; font-weight: 600; margin-top: 2px; word-break: break-all; }}
+
   .summary-stats {{
-    display: flex; gap: 16px; margin-bottom: 24px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px; margin-bottom: 24px;
   }}
   .stat {{
     background: var(--card-bg); border: 1px solid var(--border);
-    border-radius: 8px; padding: 16px 20px; text-align: center; flex: 1;
+    border-radius: 8px; padding: 14px 18px; text-align: center;
   }}
-  .stat .num {{ font-size: 28px; font-weight: 700; }}
-  .stat .lbl {{ font-size: 12px; color: var(--gray); text-transform: uppercase; }}
+  .stat .num {{ font-size: 26px; font-weight: 700; line-height: 1.1; }}
+  .stat .lbl {{ font-size: 11px; color: var(--gray); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 4px; }}
   .stat.pass .num {{ color: var(--pass); }}
   .stat.fail .num {{ color: var(--fail); }}
+  .stat.partial .num {{ color: var(--partial); }}
+
+  /* Dashboards */
+  .dashboards {{
+    display: grid; grid-template-columns: 280px 1fr; gap: 16px;
+    margin-bottom: 24px;
+  }}
+  @media (max-width: 780px) {{ .dashboards {{ grid-template-columns: 1fr; }} }}
+  .panel {{
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px 20px;
+  }}
+  .panel h3 {{
+    font-size: 13px; color: var(--gray); text-transform: uppercase;
+    letter-spacing: 0.05em; margin-bottom: 12px;
+  }}
+  .donut-wrap {{ display: flex; flex-direction: column; align-items: center; gap: 12px; }}
+  .donut .donut-num {{ font-size: 26px; font-weight: 700; fill: #111827; }}
+  .donut .donut-sub {{ font-size: 11px; fill: var(--gray); text-transform: uppercase; letter-spacing: 0.08em; }}
+  .legend {{ list-style: none; width: 100%; font-size: 13px; }}
+  .legend li {{
+    display: flex; align-items: center; gap: 8px; padding: 3px 0;
+  }}
+  .legend .dot {{
+    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+  }}
+  .legend .legend-num {{
+    margin-left: auto; font-weight: 600; color: #1f2937;
+  }}
+
+  .charts-stack {{ display: flex; flex-direction: column; gap: 16px; }}
+  .chart {{ display: flex; flex-direction: column; gap: 8px; }}
+  .chart-row {{
+    display: grid; grid-template-columns: 200px 1fr 120px;
+    gap: 12px; align-items: center; font-size: 13px;
+  }}
+  .chart-label {{
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-weight: 500;
+  }}
+  .chart-bar {{
+    height: 16px; background: var(--gray-bg); border-radius: 4px;
+    display: flex; overflow: hidden;
+  }}
+  .bar-seg {{ height: 100%; display: inline-block; }}
+  .chart-value {{
+    text-align: right; font-variant-numeric: tabular-nums;
+    color: #374151;
+  }}
+  .chart-subvalue {{
+    display: block; font-size: 11px; color: var(--gray);
+  }}
+  .chart-empty {{
+    font-size: 13px; color: var(--gray); padding: 8px 0;
+  }}
+
+  /* Logs */
+  .logs-panel {{
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 8px; margin-bottom: 24px; overflow: hidden;
+  }}
+  .logs-panel > summary {{
+    padding: 14px 20px; cursor: pointer; font-weight: 600;
+    display: flex; align-items: center; gap: 12px;
+  }}
+  .logs-panel > summary:hover {{ background: var(--bg); }}
+  .panel-count {{
+    font-size: 12px; background: var(--gray-bg); color: var(--gray);
+    padding: 1px 8px; border-radius: 10px; font-weight: 500;
+  }}
+  .log-chips {{ margin-left: auto; display: flex; gap: 10px; font-size: 12px; font-weight: 600; }}
+  .log-chip {{ letter-spacing: 0.04em; }}
+  .logs-body {{
+    max-height: 340px; overflow-y: auto;
+    font-family: 'SF Mono', Consolas, monospace; font-size: 12px;
+    border-top: 1px solid var(--border); background: #0f172a; color: #e5e7eb;
+  }}
+  .log-row {{
+    display: grid; grid-template-columns: 170px 70px 220px 1fr;
+    gap: 12px; padding: 4px 16px;
+    border-bottom: 1px solid #1f2937; white-space: pre-wrap; word-break: break-word;
+  }}
+  .log-ts {{ color: #94a3b8; }}
+  .log-level {{ font-weight: 700; letter-spacing: 0.04em; }}
+  .log-name {{ color: #a5b4fc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .log-msg {{ color: #e5e7eb; }}
+  .logs-empty {{
+    padding: 14px 20px; font-size: 13px; color: var(--gray);
+    border-top: 1px solid var(--border);
+  }}
+
   .badge {{
     display: inline-block; padding: 2px 10px; border-radius: 12px;
     font-size: 12px; font-weight: 700; letter-spacing: 0.03em;
+  }}
+
+  /* Pipeline progression (flow graph at the bottom) */
+  .section-heading {{
+    font-size: 18px; margin: 16px 0 12px;
+    padding-top: 8px; border-top: 1px solid var(--border);
   }}
   .doc-section {{
     background: var(--card-bg); border: 1px solid var(--border);
@@ -383,29 +849,73 @@ def _render_html(report: PipelineReport) -> str:
   .doc-section summary:hover {{ background: var(--bg); }}
   .doc-ufid {{ font-family: 'SF Mono', Consolas, monospace; font-size: 13px; color: var(--gray); }}
   .doc-filename {{ font-weight: 600; }}
-  .pipeline-table {{
-    width: 100%; border-collapse: collapse; font-size: 14px;
+
+  .flow-graph {{
+    display: flex; align-items: stretch; gap: 4px;
+    padding: 20px; overflow-x: auto;
+    background: linear-gradient(180deg, #ffffff 0%, #f9fafb 100%);
   }}
-  .pipeline-table th {{
-    text-align: left; padding: 10px 16px; background: var(--bg);
-    font-size: 12px; text-transform: uppercase; color: var(--gray);
-    letter-spacing: 0.04em; border-bottom: 1px solid var(--border);
+  .flow-node {{
+    flex: 1 1 0; min-width: 150px;
+    background: var(--card-bg); border: 2px solid var(--border);
+    border-radius: 10px; padding: 14px 12px;
+    display: flex; flex-direction: column; align-items: center;
+    gap: 8px; text-align: center;
+    transition: box-shadow 0.15s ease;
   }}
-  .pipeline-table td {{
-    padding: 12px 16px; border-bottom: 1px solid var(--border);
-    vertical-align: top;
+  .flow-node:hover {{ box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
+  .flow-node-pass {{ border-color: var(--pass); }}
+  .flow-node-fail {{ border-color: var(--fail); }}
+  .flow-node-partial {{ border-color: var(--partial); }}
+  .flow-node-skipped, .flow-node-pending {{ border-color: var(--border); border-style: dashed; }}
+  .flow-node-icon {{
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 2px solid; display: flex; align-items: center;
+    justify-content: center; font-size: 22px; font-weight: 700;
+    line-height: 1;
   }}
-  .pipeline-table tr:last-child td {{ border-bottom: none; }}
-  .col-num {{ width: 50px; }}
-  .col-service {{ width: 200px; }}
-  .col-status {{ width: 100px; text-align: center; }}
-  .step-num {{ text-align: center; font-weight: 600; color: var(--gray); }}
-  .step-service {{ font-size: 14px; }}
-  .step-details {{ font-size: 13px; color: #4b5563; }}
-  .step-status {{ text-align: center; }}
-  .detail-pass {{ color: var(--pass); }}
-  .detail-fail {{ color: var(--fail); }}
-  .detail-warn {{ color: var(--partial); }}
+  .flow-node-name {{ font-size: 14px; font-weight: 600; color: #1f2937; }}
+  .flow-node-status {{
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 3px 10px; border-radius: 10px; font-weight: 700;
+  }}
+  .flow-node-details {{ width: 100%; font-size: 12px; }}
+  .flow-node-details > summary {{
+    cursor: pointer; color: var(--gray); padding: 4px 0;
+    list-style: none; font-weight: 500;
+  }}
+  .flow-node-details > summary::-webkit-details-marker {{ display: none; }}
+  .flow-node-details > summary::before {{
+    content: "\u25B8 "; font-size: 10px; margin-right: 2px;
+  }}
+  .flow-node-details[open] > summary::before {{ content: "\u25BE "; }}
+  .flow-node-details[open] > summary:hover {{ color: #1f2937; }}
+  .flow-details {{
+    margin-top: 4px; text-align: left; list-style: none;
+    padding-left: 0;
+  }}
+  .flow-details li {{
+    padding: 6px 0; border-bottom: 1px solid var(--border);
+    word-break: break-word;
+  }}
+  .flow-details li:last-child {{ border-bottom: none; }}
+  .flow-detail-status {{
+    font-weight: 700; font-size: 10px; letter-spacing: 0.04em;
+    margin-right: 4px;
+  }}
+  .flow-details-empty {{
+    font-size: 12px; color: var(--gray); margin-top: 4px;
+    font-style: italic; text-align: left;
+  }}
+  .flow-arrow {{
+    align-self: center; font-size: 22px; font-weight: 700;
+    color: #9ca3af; padding: 0 2px; flex: 0 0 auto;
+  }}
+  @media (max-width: 780px) {{
+    .flow-graph {{ flex-direction: column; }}
+    .flow-arrow {{ transform: rotate(90deg); padding: 4px 0; }}
+  }}
+
   .event-timeline {{
     padding: 16px 20px; background: var(--bg);
     border-top: 1px solid var(--border);
@@ -447,14 +957,16 @@ def _render_html(report: PipelineReport) -> str:
     <span class="status-text">Overall Status: {overall.value}</span>
   </div>
   <div class="container">
+
+    <!-- Run metadata -->
     <div class="meta-grid">
       <div class="meta-card">
         <div class="label">Run ID</div>
-        <div class="value">{report.run_id}</div>
+        <div class="value">{_esc(report.run_id)}</div>
       </div>
       <div class="meta-card">
         <div class="label">Environment</div>
-        <div class="value">{report.environment}</div>
+        <div class="value">{_esc(report.environment)}</div>
       </div>
       <div class="meta-card">
         <div class="label">Tenant</div>
@@ -462,10 +974,15 @@ def _render_html(report: PipelineReport) -> str:
       </div>
       <div class="meta-card">
         <div class="label">Started</div>
-        <div class="value">{report.started_at}</div>
+        <div class="value">{_esc(report.started_at)}</div>
+      </div>
+      <div class="meta-card">
+        <div class="label">Wall Duration</div>
+        <div class="value">{_fmt_duration(wall_duration_s)}</div>
       </div>
     </div>
 
+    <!-- Summary stats -->
     <div class="summary-stats">
       <div class="stat">
         <div class="num">{total_docs}</div>
@@ -475,21 +992,57 @@ def _render_html(report: PipelineReport) -> str:
         <div class="num">{passed}</div>
         <div class="lbl">Passed</div>
       </div>
+      <div class="stat partial">
+        <div class="num">{partial}</div>
+        <div class="lbl">Partial</div>
+      </div>
       <div class="stat fail">
         <div class="num">{failed}</div>
         <div class="lbl">Failed</div>
       </div>
+      <div class="stat">
+        <div class="num">{total_steps}</div>
+        <div class="lbl">Pipeline Steps</div>
+      </div>
+      <div class="stat pass">
+        <div class="num">{step_pass_rate:.0f}%</div>
+        <div class="lbl">Step Pass Rate</div>
+      </div>
     </div>
+
+    <!-- Dashboards -->
+    <div class="dashboards">
+      <div class="panel">
+        <h3>Document Status</h3>
+        <div class="donut-wrap">
+          {donut_svg}
+          {donut_legend}
+        </div>
+      </div>
+      <div class="charts-stack">
+        <div class="panel">
+          <h3>Pipeline Stage Health <span style="font-weight:400;text-transform:none;color:#9ca3af;font-size:11px;">(pass / total steps per service)</span></h3>
+          {stage_bars}
+        </div>
+        <div class="panel">
+          <h3>Document Durations</h3>
+          {duration_bars}
+        </div>
+      </div>
+    </div>
+
+    <!-- Logs -->
+    {logs_section}
 
     {errors_section}
     {empty_state}
 
-    <h2 style="font-size:18px;margin-bottom:16px;">Pipeline Progression</h2>
-
+    <!-- Per-document pipeline flow (kept at the bottom) -->
+    <h2 class="section-heading">Pipeline Flow</h2>
     {detail_sections}
   </div>
   <div class="footer">
-    Generated by nebula-e2e-tests | {report.ended_at or report.started_at}
+    Generated by nebula-e2e-tests | {_esc(report.ended_at or report.started_at)}
   </div>
 </body>
 </html>"""

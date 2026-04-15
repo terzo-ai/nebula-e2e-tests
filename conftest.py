@@ -1,3 +1,4 @@
+import logging
 import pathlib
 from datetime import datetime, timezone
 
@@ -93,12 +94,19 @@ def pipeline_report(config: E2EConfig, run_ctx: RunContext):
         tenant_id=config.tenant_id,
         started_at=datetime.now(timezone.utc).isoformat(),
     )
-    yield report
+    # Stream log records into the report so the HTML log panel is populated.
+    formatter = logging.Formatter("%(message)s")
+    handler = report.install_log_handler(level=logging.INFO)
+    handler.setFormatter(formatter)
+    try:
+        yield report
+    finally:
+        logging.getLogger().removeHandler(handler)
 
-    report.finalize()
-    output_dir = pathlib.Path(config.report_output_dir)
-    path = report.save(output_dir / f"pipeline-{run_ctx.run_id}.html")
-    print(f"\n  Pipeline report: {path}")
+        report.finalize()
+        output_dir = pathlib.Path(config.report_output_dir)
+        path = report.save(output_dir / f"pipeline-{run_ctx.run_id}.html")
+        print(f"\n  Pipeline report: {path}")
 
 
 @pytest.fixture

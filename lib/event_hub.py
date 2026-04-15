@@ -109,6 +109,11 @@ class EventHubListener:
         self._new_event = asyncio.Event()
         # Set on __aenter__ to "now - STARTUP_LOOKBACK_MINUTES".
         self._starting_position: datetime | None = None
+        # Diagnostic counters — bumped for *every* inbound event, not just
+        # ones matching a watched ufid, so log output can distinguish
+        # "receiver is silent" from "receiver is alive but filtering".
+        self._total_events_received: int = 0
+        self._events_per_partition: dict[str, int] = {}
 
     async def __aenter__(self) -> EventHubListener:
         try:
@@ -202,6 +207,20 @@ class EventHubListener:
                 or data.get("document_id", "")
             )
 
+            # Diagnostic bookkeeping: count *every* inbound event so logs can
+            # prove the receiver is actually live even when nothing matches a
+            # watched ufid.
+            self._total_events_received += 1
+            part_key = f"{hub_name}/{partition_context.partition_id}"
+            self._events_per_partition[part_key] = (
+                self._events_per_partition.get(part_key, 0) + 1
+            )
+            logger.debug(
+                "Inbound event: hub=%s partition=%s type=%s doc=%s seq=%s watched=%s",
+                hub_name, partition_context.partition_id, event_type, doc_id,
+                event.sequence_number, doc_id in self._watched_ufids,
+            )
+
             if doc_id in self._watched_ufids:
                 captured = CapturedEvent(
                     event_type=event_type,
@@ -269,6 +288,9 @@ class EventHubListener:
                 seen[key] = event
         return duplicates
 
+    # How often wait_for_event emits a "still waiting" heartbeat line.
+    WAIT_HEARTBEAT_SECONDS: float = 15.0
+
     async def wait_for_event(
         self,
         ufid: str,
@@ -278,15 +300,46 @@ class EventHubListener:
         """Block until a specific event arrives or timeout."""
         timeout = timeout or self._timeout
         deadline = time.monotonic() + timeout
+        logger.info(
+            "Waiting for event: type=%s ufid=%s timeout=%.1fs "
+            "(receiver state: total_events=%d per_partition=%s)",
+            event_type, ufid, timeout,
+            self._total_events_received, self._events_per_partition,
+        )
+        last_heartbeat = time.monotonic()
 
         while True:
             for event in self._events:
                 if event.document_id == ufid and event.event_type == event_type:
+                    logger.info(
+                        "Resolved event: type=%s ufid=%s partition=%s seq=%d",
+                        event_type, ufid, event.partition_id, event.sequence_number,
+                    )
                     return event
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                logger.warning(
+                    "Timed out waiting for event: type=%s ufid=%s after %.1fs "
+                    "(total_events=%d per_partition=%s captured_for_ufid=%d)",
+                    event_type, ufid, timeout,
+                    self._total_events_received, self._events_per_partition,
+                    len(self.events_for(ufid)),
+                )
                 raise EventTimeoutError(ufid, event_type, timeout)
+
+            # Periodic heartbeat so a long wait is observable in logs rather
+            # than appearing hung.
+            now = time.monotonic()
+            if now - last_heartbeat >= self.WAIT_HEARTBEAT_SECONDS:
+                logger.info(
+                    "Still waiting: type=%s ufid=%s elapsed=%.0fs remaining=%.0fs "
+                    "(total_events=%d per_partition=%s captured_for_ufid=%d)",
+                    event_type, ufid, timeout - remaining, remaining,
+                    self._total_events_received, self._events_per_partition,
+                    len(self.events_for(ufid)),
+                )
+                last_heartbeat = now
 
             try:
                 await asyncio.wait_for(self._new_event.wait(), timeout=min(remaining, 2.0))

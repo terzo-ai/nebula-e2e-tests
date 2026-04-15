@@ -71,7 +71,7 @@ async def test_bulk_upload_full_pipeline(
     Each expected event becomes a row in the pipeline HTML report with
     PASS / FAIL / SKIPPED status.
     """
-    filename = run_ctx.tag_filename("tz_nebula_e2e.pdf", index=0)
+    filename = run_ctx.tag_filename(config.bulk_upload_file_name, index=0)
 
     # 1. Post bulk-upload
     response = await gateway_doc_client.bulk_upload(

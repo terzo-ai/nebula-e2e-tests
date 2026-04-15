@@ -19,6 +19,10 @@ class E2EConfig(BaseSettings):
     # Source URL for bulk-upload test fixtures (blob/file share already populated)
     bulk_upload_source_url: str = "https://stterzoaidev.file.core.windows.net/fs-terzo-ai-dev"
 
+    # Filename used for the bulk-upload test payload. Override via
+    # E2E_BULK_UPLOAD_FILE_NAME if you rotate the fixture file.
+    bulk_upload_file_name: str = "tz_nebula_e2e.pdf"
+
     # Auth service — auto-fetches access token (reachable from Dev cluster)
     auth_service_url: str = "http://auth-service-mwc1.product-internal.terzocloud.com"
     auth_service_key: str = "e9c4455dc79d417b986d0386eb7b3d25"

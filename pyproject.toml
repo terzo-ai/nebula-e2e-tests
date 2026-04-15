@@ -25,6 +25,14 @@ markers = [
     "slow: marks tests that take >60s (OCR processing)",
 ]
 
+# Live log capture — surfaces logger.info/exception from lib.event_hub
+# and friends so Event Hub listener startup / capture events / errors
+# are visible in the GitHub Actions run log.
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+log_cli_date_format = "%H:%M:%S"
+
 [tool.uv]
 dev-dependencies = [
     "ruff>=0.9",

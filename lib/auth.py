@@ -61,11 +61,7 @@ async def fetch_analytics_access_token(config: E2EConfig) -> str:
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(url, headers=headers, json=body)
         if resp.status_code >= 400:
-            raise AuthError(
-                f"Analytics login failed: {resp.status_code} {resp.reason_phrase}\n"
-                f"  url: {url}\n"
-                f"  response body: {resp.text[:2000]}"
-            )
+            raise AuthError(_format_http_error("Analytics login", url, resp))
 
     return _extract_token_from_http_response(resp, step="Analytics login")
 
@@ -87,12 +83,7 @@ async def fetch_auth_service_bearer(config: E2EConfig, analytics_access_token: s
     async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
         resp = await client.post(url, headers=headers, json=body)
         if resp.status_code >= 400:
-            raise AuthError(
-                f"auth-service token exchange failed: "
-                f"{resp.status_code} {resp.reason_phrase}\n"
-                f"  url: {url}\n"
-                f"  response body: {resp.text[:2000]}"
-            )
+            raise AuthError(_format_http_error("auth-service token exchange", url, resp))
 
     return _extract_token_from_http_response(resp, step="auth-service exchange")
 
@@ -104,6 +95,23 @@ async def fetch_access_token(config: E2EConfig) -> str:
     """
     analytics_token = await fetch_analytics_access_token(config)
     return await fetch_auth_service_bearer(config, analytics_token)
+
+
+def _format_http_error(label: str, url: str, resp: httpx.Response) -> str:
+    """Format a 4xx/5xx response with the headers most often used to explain
+    method / redirect / auth failures: Allow, Location, WWW-Authenticate.
+    """
+    diag_headers = {
+        name: resp.headers.get(name)
+        for name in ("allow", "location", "www-authenticate", "content-type")
+        if resp.headers.get(name) is not None
+    }
+    return (
+        f"{label} failed: {resp.status_code} {resp.reason_phrase}\n"
+        f"  url: {url}\n"
+        f"  diagnostic headers: {diag_headers}\n"
+        f"  response body: {resp.text[:2000]}"
+    )
 
 
 def _extract_token_from_http_response(resp: httpx.Response, *, step: str) -> str:

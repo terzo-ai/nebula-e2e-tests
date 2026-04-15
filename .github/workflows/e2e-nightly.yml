@@ -2,7 +2,11 @@ name: E2E Nightly (Dev)
 
 on:
   schedule:
-    - cron: "0 3 * * *" # 3 AM UTC daily
+    # Off-peak minute on purpose: GitHub's shared cron queue is heavily
+    # oversubscribed at round hours (e.g. "0 3 * * *"), and scheduled runs
+    # there get delayed by hours or silently dropped. 3:17 AM UTC is far
+    # less contended and fires reliably.
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       test_path:

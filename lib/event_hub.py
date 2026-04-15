@@ -300,10 +300,12 @@ class EventHubListener:
         """Block until a specific event arrives or timeout."""
         timeout = timeout or self._timeout
         deadline = time.monotonic() + timeout
+        hubs = ",".join(self._event_hub_names)
         logger.info(
             "Waiting for event: type=%s ufid=%s timeout=%.1fs "
-            "(receiver state: total_events=%d per_partition=%s)",
+            "(hubs=%s group=%s partitions=%s total_events=%d per_partition=%s)",
             event_type, ufid, timeout,
+            hubs, self._consumer_group, ",".join(self._partition_ids),
             self._total_events_received, self._events_per_partition,
         )
         last_heartbeat = time.monotonic()
@@ -312,8 +314,9 @@ class EventHubListener:
             for event in self._events:
                 if event.document_id == ufid and event.event_type == event_type:
                     logger.info(
-                        "Resolved event: type=%s ufid=%s partition=%s seq=%d",
-                        event_type, ufid, event.partition_id, event.sequence_number,
+                        "Resolved event: type=%s ufid=%s hub=%s partition=%s seq=%d",
+                        event_type, ufid, hubs, event.partition_id,
+                        event.sequence_number,
                     )
                     return event
 
@@ -321,8 +324,10 @@ class EventHubListener:
             if remaining <= 0:
                 logger.warning(
                     "Timed out waiting for event: type=%s ufid=%s after %.1fs "
-                    "(total_events=%d per_partition=%s captured_for_ufid=%d)",
+                    "(hubs=%s group=%s total_events=%d per_partition=%s "
+                    "captured_for_ufid=%d)",
                     event_type, ufid, timeout,
+                    hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
                     len(self.events_for(ufid)),
                 )
@@ -334,8 +339,10 @@ class EventHubListener:
             if now - last_heartbeat >= self.WAIT_HEARTBEAT_SECONDS:
                 logger.info(
                     "Still waiting: type=%s ufid=%s elapsed=%.0fs remaining=%.0fs "
-                    "(total_events=%d per_partition=%s captured_for_ufid=%d)",
+                    "(hubs=%s group=%s total_events=%d per_partition=%s "
+                    "captured_for_ufid=%d)",
                     event_type, ufid, timeout - remaining, remaining,
+                    hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
                     len(self.events_for(ufid)),
                 )

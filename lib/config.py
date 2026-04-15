@@ -2,7 +2,12 @@ from pydantic_settings import BaseSettings
 
 
 class E2EConfig(BaseSettings):
-    model_config = {"env_prefix": "E2E_", "env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_prefix": "E2E_",
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "env_ignore_empty": True,
+    }
 
     # All tests hit mafia.terzocloud.com (Dev environment)
     base_url: str = "https://mafia.terzocloud.com"

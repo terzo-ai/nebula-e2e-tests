@@ -39,7 +39,7 @@ async def test_presigned_upload_reaches_extraction_queued(
     through the full pipeline: CONFIRMED → OCR_QUEUED → OCR_COMPLETED → EXTRACTION_QUEUED.
     """
     test_file = test_files[0]
-    filename = run_ctx.tag_filename(test_file.name, index=0)
+    filename = test_file.name
 
     # Step 1: Initiate presigned upload
     upload = await doc_client.initiate_upload(

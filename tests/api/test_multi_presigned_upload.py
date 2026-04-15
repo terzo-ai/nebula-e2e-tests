@@ -67,7 +67,7 @@ async def test_multi_presigned_upload_all_reach_extraction_queued(
         for i in range(file_count):
             # Cycle through available test files, reuse if fewer than file_count
             test_file = test_files[i % len(test_files)]
-            filename = run_ctx.tag_filename(test_file.name, index=i)
+            filename = test_file.name
             tasks.append(
                 tg.create_task(
                     _upload_single_file(
@@ -83,7 +83,7 @@ async def test_multi_presigned_upload_all_reach_extraction_queued(
     # Register documents in report and event listener
     for i, ufid in enumerate(ufids):
         test_file = test_files[i % len(test_files)]
-        filename = run_ctx.tag_filename(test_file.name, index=i)
+        filename = test_file.name
         pipeline_report.add_document(ufid, filename)
         pipeline_report.record_step(
             ufid, "Document Service",

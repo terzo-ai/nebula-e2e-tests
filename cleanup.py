@@ -23,9 +23,9 @@ async def cleanup_e2e_documents(max_pages: int = 10) -> int:
     """
     config = E2EConfig()
 
-    # Get access token
-    if config.access_token:
-        token = config.access_token
+    # Get bearer token: manual override or two-step auth flow
+    if config.token:
+        token = config.token
     else:
         token = await fetch_access_token(config)
 

@@ -19,9 +19,14 @@ def config() -> E2EConfig:
 
 @pytest.fixture(scope="session")
 async def access_token(config: E2EConfig, pipeline_report: PipelineReport) -> str:
-    """Get access token: manual override or auto-fetch from auth service."""
-    if config.access_token:
-        return config.access_token
+    """Get bearer token for Nebula gateway requests.
+
+    Preference order:
+      1. E2E_TOKEN env var (manual override) → `config.token`
+      2. Two-step auth flow: mafia login → auth-service exchange
+    """
+    if config.token:
+        return config.token
     try:
         return await fetch_access_token(config)
     except Exception as e:

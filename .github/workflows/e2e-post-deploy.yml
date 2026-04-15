@@ -24,7 +24,15 @@ jobs:
         env:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}
-          E2E_ACCESS_TOKEN: ${{ secrets.E2E_ACCESS_TOKEN }}
+          # Manual bearer override. If unset, the two-step auth flow runs instead.
+          E2E_TOKEN: ${{ secrets.E2E_TOKEN }}
+          # Two-step auth flow (used when E2E_TOKEN is empty):
+          E2E_MAFIA_EMAIL: ${{ secrets.E2E_MAFIA_EMAIL }}
+          E2E_MAFIA_PASSWORD: ${{ secrets.E2E_MAFIA_PASSWORD }}
+          E2E_MAFIA_XSRF_TOKEN: ${{ secrets.E2E_MAFIA_XSRF_TOKEN }}
+          E2E_MAFIA_COOKIE: ${{ secrets.E2E_MAFIA_COOKIE }}
+          E2E_BULK_UPLOAD_SOURCE_URL: ${{ vars.E2E_BULK_UPLOAD_SOURCE_URL }}
+          E2E_BULK_UPLOAD_FILE_NAME: ${{ vars.E2E_BULK_UPLOAD_FILE_NAME }}
           E2E_DRIVE_PASSWORD: ${{ secrets.E2E_DRIVE_PASSWORD }}
           E2E_EVENT_HUB_CONNECTION_STRING: ${{ secrets.E2E_EVENT_HUB_CONNECTION_STRING }}
           E2E_EVENT_HUB_NAME: ${{ vars.E2E_EVENT_HUB_NAME }}

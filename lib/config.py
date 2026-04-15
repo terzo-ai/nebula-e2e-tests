@@ -23,14 +23,28 @@ class E2EConfig(BaseSettings):
     # E2E_BULK_UPLOAD_FILE_NAME if you rotate the fixture file.
     bulk_upload_file_name: str = "tz_nebula_e2e.pdf"
 
-    # Auth service — auto-fetches access token (reachable from Dev cluster)
-    auth_service_url: str = "http://auth-service-mwc1.product-internal.terzocloud.com"
-    auth_service_key: str = "e9c4455dc79d417b986d0386eb7b3d25"
-    auth_user_id: int = 1001359
-    auth_email: str = "shankar@terzocloud.com"
+    # --- Auth (two-step flow) ---
+    # Step 1: log into mafia (public) with email/password to get an ACCESS_TOKEN.
+    # Step 2: call auth-service (internal) with that ACCESS_TOKEN as X-Access-Token
+    # to exchange for the bearer token used against the Nebula gateway.
+    #
+    # If `token` is set directly (via E2E_TOKEN), both steps are skipped.
 
-    # Gateway auth — auto-fetched from auth service, or set manually
-    access_token: str = ""
+    # Step 1 — mafia login
+    mafia_base_url: str = "https://mafia.terzocloud.com"
+    mafia_email: str = ""       # via E2E_MAFIA_EMAIL secret
+    mafia_password: str = ""    # via E2E_MAFIA_PASSWORD secret
+    mafia_xsrf_token: str = ""  # via E2E_MAFIA_XSRF_TOKEN secret
+    mafia_cookie: str = ""      # via E2E_MAFIA_COOKIE secret
+
+    # Step 2 — auth-service token exchange (reachable from Dev cluster)
+    auth_service_url: str = "http://auth-service-dev1.product-internal.terzocloud.com"
+    auth_user_id: int = 1000129
+    auth_email: str = "paventhan@terzocloud.com"
+
+    # Final bearer token for gateway requests. If set manually via E2E_TOKEN,
+    # the two-step flow above is skipped.
+    token: str = ""
 
     # Test file sources (checked in order: mounted dir → azure blob → in-memory)
     # Option 1: Local directory or mounted Azure File Share (fs-terzo-ai-dev)

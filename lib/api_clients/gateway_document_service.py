@@ -8,10 +8,13 @@ In CI, `base_url` is driven by the E2E_BASE_URL repo variable.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,18 +55,36 @@ class BulkUploadResponse:
 
 
 def _extract_ufids(data: Any) -> list[str]:
-    """Find ufid strings in common response shapes.
+    """Extract ufid strings from a bulk-upload response.
 
-    Checks (in order):
-      {"ufid": "..."}
-      {"items": [{"ufid": "..."}, ...]}
-      {"documents": [{"ufid": "..."}, ...]}
-      {"data": {...}} recursively
-      Any top-level list of dicts with a ufid key
-    Also accepts `document_id` and `documentId` as aliases.
+    The server response shape is:
+        {
+          "totalItems": 1, "accepted": 1, "rejected": 0,
+          "results": [
+            {"ufid": "...", "name": "...", "status": "FILE_UPLOAD_QUEUED", "error": null}
+          ]
+        }
+
+    Prefer the documented `results[].ufid` path. Fall back to a recursive
+    walk only if the shape differs, so future server changes don't
+    immediately break the tests — with a log line so the drift is visible.
     """
     found: list[str] = []
-    _walk_for_ufids(data, found)
+    if isinstance(data, dict):
+        results = data.get("results")
+        if isinstance(results, list):
+            for item in results:
+                if isinstance(item, dict):
+                    v = item.get("ufid") or item.get("document_id") or item.get("documentId")
+                    if isinstance(v, str) and v:
+                        found.append(v)
+    if not found:
+        _walk_for_ufids(data, found)
+        if found:
+            logger.warning(
+                "bulk-upload response missing `results[].ufid`; fell back to "
+                "recursive walk. Check server contract."
+            )
     # De-dupe while preserving order
     seen: set[str] = set()
     return [u for u in found if not (u in seen or seen.add(u))]
@@ -155,4 +176,12 @@ class GatewayDocumentServiceClient:
                 f"  response headers: {debug_headers}\n"
                 f"  response body: {body_snippet}"
             )
-        return BulkUploadResponse.from_json(resp.json())
+        parsed = BulkUploadResponse.from_json(resp.json())
+        logger.info(
+            "bulk-upload parsed: accepted=%s rejected=%s totalItems=%s ufids=%s",
+            parsed.raw.get("accepted"),
+            parsed.raw.get("rejected"),
+            parsed.raw.get("totalItems"),
+            parsed.ufids,
+        )
+        return parsed

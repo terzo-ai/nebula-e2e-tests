@@ -64,26 +64,10 @@ jobs:
           name: pipeline-report-nightly
           path: reports/
 
-      - name: Read Slack summary
-        id: slack-summary
-        if: always() && vars.E2E_SLACK_NOTIFY != 'false'
-        run: |
-          if [ -f reports/slack-summary.txt ]; then
-            {
-              echo 'SLACK_TEXT<<SLACKEOF'
-              cat reports/slack-summary.txt
-              echo 'SLACKEOF'
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo "SLACK_TEXT=:warning: E2E run completed but no summary file generated." >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Send Slack notification
-        if: always() && vars.E2E_SLACK_NOTIFY != 'false' && steps.slack-summary.outputs.SLACK_TEXT
+        if: always() && vars.E2E_SLACK_NOTIFY != 'false' && hashFiles('reports/slack-payload.json') != ''
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
           token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
-          payload: |
-            channel: "C0ARRGXRY5P"
-            text: ${{ toJSON(steps.slack-summary.outputs.SLACK_TEXT) }}
+          payload-file-path: reports/slack-payload.json

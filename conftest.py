@@ -116,10 +116,15 @@ def pipeline_report(config: E2EConfig, run_ctx: RunContext):
         path = report.save(output_dir / f"pipeline-{run_ctx.run_id}.html")
         print(f"\n  Pipeline report: {path}")
 
-        # Write Slack summary for the GitHub Action notification step.
-        summary_path = output_dir / "slack-summary.txt"
-        summary_path.write_text(report.slack_summary(), encoding="utf-8")
-        print(f"  Slack summary: {summary_path}")
+        # Write Slack payload JSON for the GitHub Action notification step.
+        import json as _json
+        slack_payload = {
+            "channel": "C0ARRGXRY5P",
+            "text": report.slack_summary(),
+        }
+        payload_path = output_dir / "slack-payload.json"
+        payload_path.write_text(_json.dumps(slack_payload), encoding="utf-8")
+        print(f"  Slack payload: {payload_path}")
 
 
 @pytest.fixture

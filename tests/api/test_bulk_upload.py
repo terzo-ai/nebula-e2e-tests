@@ -6,13 +6,11 @@ PASS/FAIL pipeline-report row for each stage based on ``data.action``:
 
     1. Document Service  : PASS on HTTP 202 + ufid returned
     2. Event Hub         : PASS on first event captured for the ufid
-    3. Upload            : PASS on action=UPLOADED
-    4. OCR (queued)      : PASS on action=OCR_QUEUED
-    5. OCR (completed)   : PASS on action=OCR_COMPLETED
-    6. Extraction (queued): PASS on action=EXTRACTION_QUEUED or AI_EXTRACTION_QUEUED
-    7. Extraction (done) : PASS on action=EXTRACTION_COMPLETED or AI_EXTRACTION_COMPLETED
-    8. Ingestion (queued): PASS on action=INGESTION_QUEUED
-    9. Ingestion (done)  : PASS on action=INGESTION_COMPLETED
+    3. Upload (queued)   : PASS on action=UPLOAD_QUEUED
+    4. Upload (done)     : PASS on action=UPLOAD
+    5. OCR (queued)      : PASS on action=OCR_QUEUED
+    6. Extraction (queued): PASS on action=EXTRACTION_QUEUED
+    7. Extraction (done) : PASS on action=EXTRACTION_COMPLETED
 
 Each stage has its own independent 10-minute timeout that starts when
 the stage is entered — a slow OCR stage does not eat into the Extraction
@@ -84,8 +82,14 @@ PIPELINE_STAGES: list[PipelineStage] = [
     ),
     PipelineStage(
         service="Upload Service",
-        description="Document uploaded",
-        action="UPLOADED",
+        description="Upload queued",
+        action="UPLOAD_QUEUED",
+        timeout_s=STAGE_TIMEOUT_S,
+    ),
+    PipelineStage(
+        service="Upload Service",
+        description="Upload completed",
+        action="UPLOAD",
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
@@ -95,33 +99,15 @@ PIPELINE_STAGES: list[PipelineStage] = [
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
-        service="OCR Service",
-        description="OCR completed",
-        action="OCR_COMPLETED",
-        timeout_s=STAGE_TIMEOUT_S,
-    ),
-    PipelineStage(
         service="Extraction Service",
         description="Extraction queued",
-        action=("EXTRACTION_QUEUED", "AI_EXTRACTION_QUEUED"),
+        action="EXTRACTION_QUEUED",
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
         service="Extraction Service",
         description="Extraction completed",
-        action=("EXTRACTION_COMPLETED", "AI_EXTRACTION_COMPLETED"),
-        timeout_s=STAGE_TIMEOUT_S,
-    ),
-    PipelineStage(
-        service="Ingestion Service",
-        description="Ingestion queued",
-        action="INGESTION_QUEUED",
-        timeout_s=STAGE_TIMEOUT_S,
-    ),
-    PipelineStage(
-        service="Ingestion Service",
-        description="Ingestion completed",
-        action="INGESTION_COMPLETED",
+        action="EXTRACTION_COMPLETED",
         timeout_s=STAGE_TIMEOUT_S,
     ),
 ]

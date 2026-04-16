@@ -496,8 +496,7 @@ _FLOW_STAGES: list[tuple[str, tuple[str, ...]]] = [
     ("Event Hub",        ("Event Hub",)),
     ("Upload",           ("Upload Service",)),
     ("OCR",              ("OCR Service",)),
-    ("AI Extraction",    ("Extraction Service",)),
-    ("Ingestion",        ("Ingestion Service",)),
+    ("Extraction",       ("Extraction Service",)),
 ]
 
 _FLOW_ICONS: dict[StepStatus, str] = {

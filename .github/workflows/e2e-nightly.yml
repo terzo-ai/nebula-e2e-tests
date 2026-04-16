@@ -71,3 +71,4 @@ jobs:
           method: chat.postMessage
           token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
           payload-file-path: reports/slack-payload.json
+          errors: true

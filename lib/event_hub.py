@@ -195,10 +195,11 @@ class EventHubListener:
             except (json.JSONDecodeError, Exception):
                 payload = {"_raw": event.body_as_str() if event else ""}
 
-            # Print raw event body for debugging — shows ALL inbound events
-            print(
-                f"  [EventHub RAW] hub={hub_name} partition={partition_context.partition_id} "
-                f"seq={event.sequence_number} body={body[:500]}"
+            # Log raw event body for debugging — shows ALL inbound events
+            logger.warning(
+                "[EventHub RAW] hub=%s partition=%s seq=%s body=%s",
+                hub_name, partition_context.partition_id,
+                event.sequence_number, body[:500],
             )
 
             # Extract action, document ID, and CloudEvents id from the payload.
@@ -251,6 +252,11 @@ class EventHubListener:
 
             await partition_context.update_checkpoint(event)
 
+        logger.warning(
+            "Starting receive loop: hub=%s partition=%s group=%s starting_from=%s",
+            hub_name, partition_id, self._consumer_group,
+            self._starting_position.isoformat() if self._starting_position else "None",
+        )
         try:
             await consumer.receive(
                 on_event=on_event,

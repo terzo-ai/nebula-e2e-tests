@@ -51,9 +51,9 @@ Two end-to-end paths against the Nebula gateway (`https://terzoai-gateway-dev.te
 
 - POST to `/api/v1/documents/bulk-upload` with a single `sourceUrl` item
 - Extract the `ufid` from the response
-- Listen to **all 5 child Event Hubs in parallel** for the 7 `com.terzo.document.*` events the pipeline should emit
-- Record each event as a **PASS / FAIL row** in the HTML pipeline report, attributed to one of the 4 services
-- If `com.terzo.document.failed` fires, mark remaining steps FAIL and surface the `failure_reason` payload field
+- Listen to **all 5 child Event Hubs in parallel** for pipeline events tracked by `data.action` (UPLOADED → OCR_QUEUED → OCR_COMPLETED → EXTRACTION_QUEUED → EXTRACTION_COMPLETED → INGESTION_QUEUED → INGESTION_COMPLETED)
+- Record each action as a **PASS / FAIL row** in the HTML pipeline report
+- If `action=FAILED` fires, mark remaining steps FAIL and surface the `failure_reason` payload field
 
 ### 2. Presigned SAS upload + pipeline progression (legacy)
 
@@ -108,13 +108,16 @@ Two end-to-end paths against the Nebula gateway (`https://terzoai-gateway-dev.te
        │   in parallel and matches events by document_id == ufid.
        │   Each captured event becomes a row in the HTML pipeline report.
        │
-       │   Tracked event types (per docs/EVENT_TYPES.md):
-       │     com.terzo.document.uploaded                      (Event Hub stage uses the
+       │   Tracked actions (data.action field):
+       │     UPLOADED                                          (Event Hub stage uses the
        │                                                       first event — typically this)
-       │     com.terzo.document.ocr.completed
-       │     com.terzo.document.auto_extraction.completed
-       │     com.terzo.document.ingestion.completed
-       │     com.terzo.document.failed   (short-circuits remaining stages to FAIL)
+       │     OCR_QUEUED
+       │     OCR_COMPLETED
+       │     EXTRACTION_QUEUED / AI_EXTRACTION_QUEUED
+       │     EXTRACTION_COMPLETED / AI_EXTRACTION_COMPLETED
+       │     INGESTION_QUEUED
+       │     INGESTION_COMPLETED
+       │     FAILED   (short-circuits remaining stages to FAIL)
 ```
 
 ### Legacy presigned-upload path
@@ -348,19 +351,23 @@ Parametrized test that runs with **3, 5, and 10 files** uploaded concurrently.
 
 The primary daily-run test. Submits one bulk-upload item, then watches Event Hub for the full pipeline progression.
 
-| Step | Service | Event / API call | Per-stage timeout |
-|------|---------|------------------|-------------------|
+| Step | Service | Action (`data.action`) | Per-stage timeout |
+|------|---------|------------------------|-------------------|
 | 01 | **Document Service** | `POST /api/v1/documents/bulk-upload` → HTTP 202, ufid extracted | — |
 | 02 | **Event Hub** | First event captured for the ufid (proves listener wiring) | 600s |
-| 03 | **OCR Service** | `com.terzo.document.ocr.completed` | 600s |
-| 04 | **Extraction Service** | `com.terzo.document.auto_extraction.completed` | 600s |
-| 05 | **Ingestion Service** | `com.terzo.document.ingestion.completed` | 600s |
+| 03 | **Upload Service** | `UPLOADED` | 600s |
+| 04 | **OCR Service** | `OCR_QUEUED` | 600s |
+| 05 | **OCR Service** | `OCR_COMPLETED` | 600s |
+| 06 | **Extraction Service** | `EXTRACTION_QUEUED` / `AI_EXTRACTION_QUEUED` | 600s |
+| 07 | **Extraction Service** | `EXTRACTION_COMPLETED` / `AI_EXTRACTION_COMPLETED` | 600s |
+| 08 | **Ingestion Service** | `INGESTION_QUEUED` | 600s |
+| 09 | **Ingestion Service** | `INGESTION_COMPLETED` | 600s |
 
 Each step becomes a row in `reports/pipeline-<run-id>.html` with PASS / FAIL / SKIPPED status.
 
-**Per-stage timeout semantics.** Each stage has its own 10-minute wall-clock budget that resets on stage entry — a slow OCR stage does not eat into the Extraction or Ingestion budget. If a stage's expected event does not arrive within 600s, the test **force-kills**: that stage is recorded FAIL, all downstream stages are recorded SKIPPED, and `pytest.fail()` aborts immediately so the run can never hang past ~10 minutes on a single stage.
+**Per-stage timeout semantics.** Each stage has its own 10-minute wall-clock budget that resets on stage entry — a slow OCR stage does not eat into the Extraction or Ingestion budget. If a stage's expected action does not arrive within 600s, the test **force-kills**: that stage is recorded FAIL, all downstream stages are recorded SKIPPED, and `pytest.fail()` aborts immediately so the run can never hang past ~10 minutes on a single stage.
 
-**Failure event.** If `com.terzo.document.failed` fires for the ufid at any point, remaining steps are recorded FAIL with the `failure_reason` payload field and the test fails.
+**Failure action.** If `action=FAILED` fires for the ufid at any point, remaining steps are recorded FAIL with the `failure_reason` payload field and the test fails.
 
 **Event Hub not configured.** If `E2E_EVENT_HUB_CONNECTION_STRING` is unset, steps 02-05 are recorded SKIPPED and the test calls `pytest.skip()` so the daily run doesn't fail on missing infra.
 

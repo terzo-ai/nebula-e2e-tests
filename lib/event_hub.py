@@ -1,13 +1,14 @@
 """Event Hub listener: captures pipeline events during E2E test execution.
 
 Connects to Azure Event Hub, listens for events matching watched document IDs,
-and captures them for assertion and reporting. Supports duplicate detection.
+and captures them for assertion and reporting. Events are tracked by their
+``data.action`` field (e.g. UPLOADED, OCR_COMPLETED) and CloudEvents ``id``.
 
 Usage:
     async with EventHubListener(conn_str, hub_name) as listener:
         listener.watch(ufid)
         # ... run test pipeline ...
-        assert listener.has_event(ufid, "ocr.queued")
+        assert listener.has_event(ufid, "OCR_QUEUED")
         assert not listener.find_duplicates()
 """
 
@@ -26,8 +27,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CapturedEvent:
-    event_type: str
-    document_id: str
+    event_id: str  # CloudEvents "id" field
+    action: str  # data.action (e.g. "OCR_COMPLETED")
+    document_id: str  # data.document_id
     timestamp: float  # time.monotonic() when received
     received_at: str  # ISO 8601 wall-clock time
     sequence_number: int
@@ -36,12 +38,12 @@ class CapturedEvent:
 
 
 class EventTimeoutError(Exception):
-    def __init__(self, ufid: str, event_type: str, timeout: float):
+    def __init__(self, ufid: str, action: str, timeout: float):
         self.ufid = ufid
-        self.event_type = event_type
+        self.action = action
         self.timeout = timeout
         super().__init__(
-            f"Timed out waiting for event '{event_type}' "
+            f"Timed out waiting for action '{action}' "
             f"for document {ufid} after {timeout}s"
         )
 
@@ -193,19 +195,15 @@ class EventHubListener:
             except (json.JSONDecodeError, Exception):
                 payload = {"_raw": event.body_as_str() if event else ""}
 
-            # Extract event type and document ID from the payload.
-            # Supports CloudEvents v1.0 and flat event formats.
-            event_type = (
-                payload.get("type")
-                or payload.get("eventType")
-                or payload.get("event_type", "unknown")
-            )
+            # Extract action, document ID, and CloudEvents id from the payload.
             data = payload.get("data", payload)
+            action = data.get("action", "")
             doc_id = (
                 data.get("documentId")
                 or data.get("ufid")
                 or data.get("document_id", "")
             )
+            event_id = payload.get("id", "")
 
             # Diagnostic bookkeeping: count *every* inbound event so logs can
             # prove the receiver is actually live even when nothing matches a
@@ -216,14 +214,15 @@ class EventHubListener:
                 self._events_per_partition.get(part_key, 0) + 1
             )
             logger.debug(
-                "Inbound event: hub=%s partition=%s type=%s doc=%s seq=%s watched=%s",
-                hub_name, partition_context.partition_id, event_type, doc_id,
-                event.sequence_number, doc_id in self._watched_ufids,
+                "Inbound event: hub=%s partition=%s action=%s doc=%s id=%s seq=%s watched=%s",
+                hub_name, partition_context.partition_id, action, doc_id,
+                event_id, event.sequence_number, doc_id in self._watched_ufids,
             )
 
             if doc_id in self._watched_ufids:
                 captured = CapturedEvent(
-                    event_type=event_type,
+                    event_id=event_id,
+                    action=action,
                     document_id=doc_id,
                     timestamp=time.monotonic(),
                     received_at=datetime.now(timezone.utc).isoformat(),
@@ -234,9 +233,13 @@ class EventHubListener:
                 self._events.append(captured)
                 self._new_event.set()
                 self._new_event.clear()
+                print(
+                    f"  [EventHub] id={event_id} action={action} "
+                    f"document_id={doc_id} partition={partition_context.partition_id}"
+                )
                 logger.info(
-                    "Captured event: hub=%s type=%s doc=%s partition=%s seq=%d",
-                    hub_name, event_type, doc_id,
+                    "Captured event: hub=%s action=%s id=%s doc=%s partition=%s seq=%d",
+                    hub_name, action, event_id, doc_id,
                     partition_context.partition_id, captured.sequence_number,
                 )
 
@@ -269,15 +272,24 @@ class EventHubListener:
         """Events filtered to a specific document ID."""
         return [e for e in self.events if e.document_id == ufid]
 
-    def has_event(self, ufid: str, event_type: str) -> bool:
-        """Check if a specific event type was captured for a document."""
+    def has_event(self, ufid: str, action: str | tuple[str, ...]) -> bool:
+        """Check if a specific action was captured for a document.
+
+        Accepts a single action string or a tuple of action strings
+        (matches if any of them was captured).
+        """
+        if isinstance(action, tuple):
+            return any(
+                e.document_id == ufid and e.action in action
+                for e in self._events
+            )
         return any(
-            e.document_id == ufid and e.event_type == event_type
+            e.document_id == ufid and e.action == action
             for e in self._events
         )
 
-    def event_types_for(self, ufid: str) -> list[str]:
-        """Distinct event types captured for a ufid, in arrival order.
+    def actions_for(self, ufid: str) -> list[str]:
+        """Distinct actions captured for a ufid, in arrival order.
 
         Primary diagnostic for "what did the listener actually see for
         this document?" Used by waits/timeouts and the end-of-test summary
@@ -285,16 +297,16 @@ class EventHubListener:
         """
         seen: list[str] = []
         for event in self.events_for(ufid):
-            if event.event_type not in seen:
-                seen.append(event.event_type)
+            if event.action not in seen:
+                seen.append(event.action)
         return seen
 
     def find_duplicates(self) -> list[tuple[CapturedEvent, CapturedEvent]]:
-        """Find pairs of events with same (document_id, event_type)."""
+        """Find pairs of events with same (document_id, action)."""
         seen: dict[tuple[str, str], CapturedEvent] = {}
         duplicates: list[tuple[CapturedEvent, CapturedEvent]] = []
         for event in self.events:
-            key = (event.document_id, event.event_type)
+            key = (event.document_id, event.action)
             if key in seen:
                 duplicates.append((seen[key], event))
             else:
@@ -312,85 +324,87 @@ class EventHubListener:
         """Block until ANY event for a ufid arrives, or timeout.
 
         Used to confirm the Event Hub listener is actively receiving events
-        for the watched document — the first event (typically
-        `com.terzo.document.uploaded`) is enough to prove the listener is
-        wired up and the producer is emitting. The per-stage timeout resets
-        on each call.
+        for the watched document — the first event (typically action=UPLOADED)
+        is enough to prove the listener is wired up and the producer is
+        emitting. The per-stage timeout resets on each call.
         """
-        # Sentinel event_type "" signals "match first event for this ufid".
-        return await self.wait_for_event(ufid, event_type="", timeout=timeout)
+        # Sentinel action "" signals "match first event for this ufid".
+        return await self.wait_for_event(ufid, action="", timeout=timeout)
 
     async def wait_for_event(
         self,
         ufid: str,
-        event_type: str,
+        action: str | tuple[str, ...],
         timeout: float | None = None,
     ) -> CapturedEvent:
-        """Block until a specific event arrives or timeout.
+        """Block until an event with a matching action arrives or timeout.
 
-        If ``event_type`` is an empty string, the first event captured for
-        ``ufid`` (regardless of type) satisfies the wait. See
-        :meth:`wait_for_any_event`.
+        If ``action`` is an empty string, the first event captured for
+        ``ufid`` (regardless of action) satisfies the wait.
+        If ``action`` is a tuple, any of the listed actions satisfies the wait.
         """
         timeout = timeout or self._timeout
         deadline = time.monotonic() + timeout
         hubs = ",".join(self._event_hub_names)
-        type_label = event_type or "<any>"
+        action_label = action if action else "<any>"
         logger.info(
-            "Waiting for event: type=%s ufid=%s timeout=%.1fs "
+            "Waiting for event: action=%s ufid=%s timeout=%.1fs "
             "(hubs=%s group=%s partitions=%s total_events=%d per_partition=%s "
-            "captured_types_for_ufid=%s)",
-            type_label, ufid, timeout,
+            "captured_actions_for_ufid=%s)",
+            action_label, ufid, timeout,
             hubs, self._consumer_group, ",".join(self._partition_ids),
             self._total_events_received, self._events_per_partition,
-            self.event_types_for(ufid),
+            self.actions_for(ufid),
         )
         last_heartbeat = time.monotonic()
 
         def _matches(event: CapturedEvent) -> bool:
             if event.document_id != ufid:
                 return False
-            # Empty event_type means "first event for this ufid wins".
-            return not event_type or event.event_type == event_type
+            if not action:
+                return True
+            if isinstance(action, tuple):
+                return event.action in action
+            return event.action == action
 
         while True:
             for event in self._events:
                 if _matches(event):
                     logger.info(
-                        "Resolved event: type=%s ufid=%s actual_type=%s "
-                        "hub=%s partition=%s seq=%d",
-                        type_label, ufid, event.event_type, hubs,
-                        event.partition_id, event.sequence_number,
+                        "Resolved event: action=%s ufid=%s actual_action=%s "
+                        "id=%s hub=%s partition=%s seq=%d",
+                        action_label, ufid, event.action, event.event_id,
+                        hubs, event.partition_id, event.sequence_number,
                     )
                     return event
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 logger.warning(
-                    "Timed out waiting for event: type=%s ufid=%s after %.1fs "
+                    "Timed out waiting for event: action=%s ufid=%s after %.1fs "
                     "(hubs=%s group=%s total_events=%d per_partition=%s "
-                    "captured_for_ufid=%d captured_types_for_ufid=%s)",
-                    type_label, ufid, timeout,
+                    "captured_for_ufid=%d captured_actions_for_ufid=%s)",
+                    action_label, ufid, timeout,
                     hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
                     len(self.events_for(ufid)),
-                    self.event_types_for(ufid),
+                    self.actions_for(ufid),
                 )
-                raise EventTimeoutError(ufid, event_type or "<any>", timeout)
+                raise EventTimeoutError(ufid, str(action) or "<any>", timeout)
 
             # Periodic heartbeat so a long wait is observable in logs rather
             # than appearing hung.
             now = time.monotonic()
             if now - last_heartbeat >= self.WAIT_HEARTBEAT_SECONDS:
                 logger.info(
-                    "Still waiting: type=%s ufid=%s elapsed=%.0fs remaining=%.0fs "
+                    "Still waiting: action=%s ufid=%s elapsed=%.0fs remaining=%.0fs "
                     "(hubs=%s group=%s total_events=%d per_partition=%s "
-                    "captured_for_ufid=%d captured_types_for_ufid=%s)",
-                    type_label, ufid, timeout - remaining, remaining,
+                    "captured_for_ufid=%d captured_actions_for_ufid=%s)",
+                    action_label, ufid, timeout - remaining, remaining,
                     hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
                     len(self.events_for(ufid)),
-                    self.event_types_for(ufid),
+                    self.actions_for(ufid),
                 )
                 last_heartbeat = now
 

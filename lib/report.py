@@ -494,7 +494,8 @@ def _logs_html(report: PipelineReport) -> str:
 _FLOW_STAGES: list[tuple[str, tuple[str, ...]]] = [
     ("Document Service", ("Document Service", "UI / Drive")),
     ("Event Hub",        ("Event Hub",)),
-    ("OCR",              ("OCR Service", "OCR Service / Event Hub")),
+    ("Upload",           ("Upload Service",)),
+    ("OCR",              ("OCR Service",)),
     ("AI Extraction",    ("Extraction Service",)),
     ("Ingestion",        ("Ingestion Service",)),
 ]
@@ -672,11 +673,13 @@ def _render_html(report: PipelineReport) -> str:
             event_rows = ""
             for ev in events_for_doc:
                 short_doc_id = str(ev.document_id)[:8] if ev.document_id else "-"
+                short_event_id = str(ev.event_id)[:12] if ev.event_id else "-"
                 payload_html = _payload_json_html(ev.payload)
                 event_rows += f"""
                 <tr>
                   <td><code>{_esc(str(ev.received_at))}</code></td>
-                  <td><code>{_esc(str(ev.event_type))}</code></td>
+                  <td><code>{_esc(str(ev.action))}</code></td>
+                  <td><code title="{_esc(str(ev.event_id))}">{_esc(short_event_id)}</code></td>
                   <td><code title="{_esc(str(ev.document_id))}">{_esc(short_doc_id)}</code></td>
                   <td>{_esc(str(ev.partition_id))}</td>
                   <td>{_esc(str(ev.sequence_number))}</td>
@@ -694,8 +697,8 @@ def _render_html(report: PipelineReport) -> str:
               </h4>
               <table class="events-table">
                 <thead><tr>
-                  <th>Received At</th><th>Event Type</th><th>Doc ID</th>
-                  <th>Partition</th><th>Seq #</th><th>Payload</th>
+                  <th>Received At</th><th>Action</th><th>Event ID</th>
+                  <th>Doc ID</th><th>Partition</th><th>Seq #</th><th>Payload</th>
                 </tr></thead>
                 <tbody>{event_rows}</tbody>
               </table>

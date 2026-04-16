@@ -189,10 +189,10 @@ async def test_presigned_upload_reaches_extraction_queued(
             if trace and trace.steps:
                 trace.steps[-1].events = events
 
-        if event_listener.has_event(ufid, "ocr.queued"):
-            assert event_listener.has_event(ufid, "ocr.queued"), "Missing ocr.queued event"
-        if event_listener.has_event(ufid, "ocr.completed"):
-            assert event_listener.has_event(ufid, "ocr.completed"), "Missing ocr.completed event"
+        if event_listener.has_event(ufid, "OCR_QUEUED"):
+            assert event_listener.has_event(ufid, "OCR_QUEUED"), "Missing OCR_QUEUED event"
+        if event_listener.has_event(ufid, "OCR_COMPLETED"):
+            assert event_listener.has_event(ufid, "OCR_COMPLETED"), "Missing OCR_COMPLETED event"
 
         dupes = event_listener.find_duplicates()
         assert not dupes, f"Duplicate events detected: {dupes}"

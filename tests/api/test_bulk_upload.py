@@ -2,19 +2,23 @@
 
 Invokes POST {E2E_BASE_URL}/api/v1/documents/bulk-upload with a single item,
 extracts the ufid from the response, then watches Event Hub and records a
-PASS/FAIL pipeline-report row for each stage:
+PASS/FAIL pipeline-report row for each stage based on ``data.action``:
 
-    1. Document Service : PASS on HTTP 202 + ufid returned
-    2. Event Hub        : PASS on first event captured for the ufid
-    3. OCR Service      : PASS on com.terzo.document.ocr.completed
-    4. Extraction Service: PASS on com.terzo.document.auto_extraction.completed
-    5. Ingestion Service : PASS on com.terzo.document.ingestion.completed
+    1. Document Service  : PASS on HTTP 202 + ufid returned
+    2. Event Hub         : PASS on first event captured for the ufid
+    3. Upload            : PASS on action=UPLOADED
+    4. OCR (queued)      : PASS on action=OCR_QUEUED
+    5. OCR (completed)   : PASS on action=OCR_COMPLETED
+    6. Extraction (queued): PASS on action=EXTRACTION_QUEUED or AI_EXTRACTION_QUEUED
+    7. Extraction (done) : PASS on action=EXTRACTION_COMPLETED or AI_EXTRACTION_COMPLETED
+    8. Ingestion (queued): PASS on action=INGESTION_QUEUED
+    9. Ingestion (done)  : PASS on action=INGESTION_COMPLETED
 
 Each stage has its own independent 10-minute timeout that starts when
 the stage is entered — a slow OCR stage does not eat into the Extraction
 or Ingestion budget. A hard timeout force-kills the test immediately
 (remaining stages recorded as SKIPPED) so the job can never hang past
-~10 minutes on a single stage. `com.terzo.document.failed` also
+~10 minutes on a single stage. An event with action=FAILED also
 short-circuits remaining stages to FAIL with the payload's failure_reason.
 
 The HTML pipeline report is rendered at session teardown and uploaded as
@@ -43,23 +47,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-FAILURE_EVENT = "com.terzo.document.failed"
+FAILURE_ACTION = "FAILED"
 
 
 @dataclass(frozen=True)
 class PipelineStage:
     """One row in the pipeline report that waits on Event Hub.
 
-    ``event_type`` = None means "first event captured for this ufid wins"
+    ``action`` = None means "first event captured for this ufid wins"
     (used for the Event Hub stage, which just proves the listener is
-    receiving traffic for the document). Each stage's ``timeout_s`` starts
-    fresh when the stage is entered, so the per-stage budget does not
-    bleed between stages.
+    receiving traffic for the document). A tuple of action strings means
+    "any of these actions satisfies the stage". Each stage's ``timeout_s``
+    starts fresh when the stage is entered, so the per-stage budget does
+    not bleed between stages.
     """
 
     service: str
     description: str
-    event_type: str | None
+    action: str | tuple[str, ...] | None
     timeout_s: float
 
 
@@ -70,30 +75,53 @@ class PipelineStage:
 # the run can never hang past ~10 minutes on a single stage.
 STAGE_TIMEOUT_S: float = 600.0
 
-# Ordered per docs/EVENT_TYPES.md.
 PIPELINE_STAGES: list[PipelineStage] = [
     PipelineStage(
         service="Event Hub",
         description="Event Hub listener received first event for ufid",
-        event_type=None,
+        action=None,
+        timeout_s=STAGE_TIMEOUT_S,
+    ),
+    PipelineStage(
+        service="Upload Service",
+        description="Document uploaded",
+        action="UPLOADED",
+        timeout_s=STAGE_TIMEOUT_S,
+    ),
+    PipelineStage(
+        service="OCR Service",
+        description="OCR queued",
+        action="OCR_QUEUED",
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
         service="OCR Service",
         description="OCR completed",
-        event_type="com.terzo.document.ocr.completed",
+        action="OCR_COMPLETED",
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
         service="Extraction Service",
-        description="AI Extraction completed",
-        event_type="com.terzo.document.auto_extraction.completed",
+        description="Extraction queued",
+        action=("EXTRACTION_QUEUED", "AI_EXTRACTION_QUEUED"),
+        timeout_s=STAGE_TIMEOUT_S,
+    ),
+    PipelineStage(
+        service="Extraction Service",
+        description="Extraction completed",
+        action=("EXTRACTION_COMPLETED", "AI_EXTRACTION_COMPLETED"),
+        timeout_s=STAGE_TIMEOUT_S,
+    ),
+    PipelineStage(
+        service="Ingestion Service",
+        description="Ingestion queued",
+        action="INGESTION_QUEUED",
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
         service="Ingestion Service",
         description="Ingestion completed",
-        event_type="com.terzo.document.ingestion.completed",
+        action="INGESTION_COMPLETED",
         timeout_s=STAGE_TIMEOUT_S,
     ),
 ]
@@ -171,17 +199,17 @@ async def test_bulk_upload_full_pipeline(
 
     aborted = False
     for stage_idx, stage in enumerate(PIPELINE_STAGES):
-        # Short-circuit: a prior stage already saw the failure event, or
+        # Short-circuit: a prior stage already saw the failure action, or
         # one arrived between stages. Record each remaining stage as FAIL
         # with the failure_reason — no further Event Hub waits happen.
-        if aborted or event_listener.has_event(ufid, FAILURE_EVENT):
+        if aborted or event_listener.has_event(ufid, FAILURE_ACTION):
             aborted = True
             failure_reason = _failure_reason(event_listener, ufid)
             pipeline_report.record_step(
                 ufid, stage.service, stage.description,
                 StepStatus.FAIL,
                 details=(
-                    f"Pipeline aborted — {FAILURE_EVENT} received. "
+                    f"Pipeline aborted — action={FAILURE_ACTION} received. "
                     f"failure_reason: {failure_reason}"
                 ),
             )
@@ -191,20 +219,21 @@ async def test_bulk_upload_full_pipeline(
         # their own deadline from `time.monotonic()` on each call, so the
         # budget resets cleanly when we advance from one stage to the next.
         try:
-            if stage.event_type is None:
+            if stage.action is None:
                 event = await event_listener.wait_for_any_event(
                     ufid, timeout=stage.timeout_s
                 )
                 detail_prefix = (
-                    f"First event for ufid: {event.event_type} "
-                    f"at {event.received_at}"
+                    f"First event for ufid: action={event.action} "
+                    f"id={event.event_id} at {event.received_at}"
                 )
             else:
                 event = await event_listener.wait_for_event(
-                    ufid, stage.event_type, timeout=stage.timeout_s
+                    ufid, stage.action, timeout=stage.timeout_s
                 )
                 detail_prefix = (
-                    f"Event {event.event_type} received at {event.received_at}"
+                    f"action={event.action} id={event.event_id} "
+                    f"received at {event.received_at}"
                 )
             pipeline_report.record_step(
                 ufid, stage.service, stage.description,
@@ -215,28 +244,28 @@ async def test_bulk_upload_full_pipeline(
                 ),
             )
         except Exception as e:  # EventTimeoutError, etc.
-            # If the failure event arrived during the wait, treat that as
+            # If the failure action arrived during the wait, treat that as
             # the cause and let the short-circuit handle remaining stages.
-            if event_listener.has_event(ufid, FAILURE_EVENT):
+            if event_listener.has_event(ufid, FAILURE_ACTION):
                 aborted = True
                 failure_reason = _failure_reason(event_listener, ufid)
                 pipeline_report.record_step(
                     ufid, stage.service, stage.description,
                     StepStatus.FAIL,
                     details=(
-                        f"{FAILURE_EVENT} received during wait. "
+                        f"action={FAILURE_ACTION} received during wait. "
                         f"failure_reason: {failure_reason}"
                     ),
                 )
                 continue
 
-            # Hard timeout with no failure event — force-kill the run.
+            # Hard timeout with no failure action — force-kill the run.
             # Record this stage FAIL, remaining stages SKIPPED (they
             # genuinely never ran), attach captured events, then abort.
-            expected_label = stage.event_type or "<any event for ufid>"
+            expected_label = stage.action or "<any event for ufid>"
             timeout_msg = (
                 f"Timed out after {stage.timeout_s:.0f}s waiting for "
-                f"{expected_label}. {type(e).__name__}: {e}"
+                f"action={expected_label}. {type(e).__name__}: {e}"
             )
             pipeline_report.record_step(
                 ufid, stage.service, stage.description,
@@ -258,13 +287,13 @@ async def test_bulk_upload_full_pipeline(
                 f"exceeded its {stage.timeout_s:.0f}s budget. {timeout_msg}"
             )
 
-    # Fail the pytest run if the pipeline emitted a failure event, so CI
+    # Fail the pytest run if the pipeline emitted a failure action, so CI
     # surfaces a red test in addition to the HTML report row.
-    if event_listener.has_event(ufid, FAILURE_EVENT):
+    if event_listener.has_event(ufid, FAILURE_ACTION):
         failure_reason = _failure_reason(event_listener, ufid)
         _attach_events_to_last_step(pipeline_report, event_listener, ufid)
         pytest.fail(
-            f"Pipeline failed for {ufid}: {FAILURE_EVENT} received. "
+            f"Pipeline failed for {ufid}: action={FAILURE_ACTION} received. "
             f"failure_reason: {failure_reason}"
         )
 
@@ -278,34 +307,34 @@ def _attach_events_to_last_step(
 ) -> None:
     """Attach captured Event Hub events to the last report step so they
     render in the HTML timeline, regardless of which code path finished
-    the stage loop (PASS, failure-event short-circuit, or force-kill).
+    the stage loop (PASS, failure-action short-circuit, or force-kill).
 
-    Also emits a single summary log line naming every event type the
+    Also emits a single summary log line naming every action the
     listener received for this ufid — invaluable when diagnosing "the
-    event we were waiting for never fired; what DID fire?" cases.
+    action we were waiting for never fired; what DID fire?" cases.
     """
     trace = pipeline_report._find_trace(ufid)
     if trace and trace.steps:
         trace.steps[-1].events = event_listener.events_for(ufid)
 
-    captured_types = event_listener.event_types_for(ufid)
+    captured_actions = event_listener.actions_for(ufid)
     events = event_listener.events_for(ufid)
     logger.info(
-        "Event Hub summary for ufid=%s: %d event(s) captured, distinct types=%s",
-        ufid, len(events), captured_types or "[]",
+        "Event Hub summary for ufid=%s: %d event(s) captured, distinct actions=%s",
+        ufid, len(events), captured_actions or "[]",
     )
     for event in events:
         logger.info(
-            "  captured: type=%s partition=%s seq=%d received_at=%s",
-            event.event_type, event.partition_id,
-            event.sequence_number, event.received_at,
+            "  captured: action=%s id=%s document_id=%s partition=%s seq=%d received_at=%s",
+            event.action, event.event_id, event.document_id,
+            event.partition_id, event.sequence_number, event.received_at,
         )
 
 
 def _failure_reason(event_listener: "EventHubListener", ufid: str) -> str:
-    """Pull `failure_reason` from the document.failed payload, if present."""
+    """Pull `failure_reason` from the FAILED event payload, if present."""
     for event in event_listener.events_for(ufid):
-        if event.event_type == FAILURE_EVENT:
+        if event.action == FAILURE_ACTION:
             data = event.payload.get("data") or event.payload
             return str(data.get("failure_reason", "(no failure_reason in payload)"))
     return "(no failure event captured)"

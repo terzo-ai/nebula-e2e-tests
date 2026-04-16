@@ -25,10 +25,10 @@ LISTEN_SECONDS = 60
 
 # Set to a ufid to filter — only events for this document are printed.
 # Set to "" to print ALL events.
-TARGET_UFID = "5f2f04d9-77be-4606-9b2d-224c1f40ee0b"
+TARGET_UFID = ""
 
 # How far back to look (hours). Event Hub retention must cover this.
-LOOKBACK_HOURS = 24
+LOOKBACK_HOURS = 1
 
 
 async def test_event_hub_dry_run(config: E2EConfig) -> None:
@@ -41,7 +41,7 @@ async def test_event_hub_dry_run(config: E2EConfig) -> None:
     except ImportError:
         pytest.skip("azure-eventhub not installed")
 
-    hub_name = "terzo-ai-contract-document-events"
+    hub_name = "terzo-ai-ocr-events"
     consumer_group = config.event_hub_consumer_group
     partition_ids = ("0", "1", "2", "3")
 

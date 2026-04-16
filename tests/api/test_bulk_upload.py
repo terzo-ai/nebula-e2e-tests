@@ -6,11 +6,11 @@ PASS/FAIL pipeline-report row for each stage based on ``data.action``:
 
     1. Document Service  : PASS on HTTP 202 + ufid returned
     2. Event Hub         : PASS on first event captured for the ufid
-    3. Upload (queued)   : PASS on action=UPLOAD_QUEUED
-    4. Upload (done)     : PASS on action=UPLOAD
-    5. OCR (queued)      : PASS on action=OCR_QUEUED
-    6. Extraction (queued): PASS on action=EXTRACTION_QUEUED
-    7. Extraction (done) : PASS on action=EXTRACTION_COMPLETED
+    3. Document Service  : PASS on action=UPLOAD_QUEUED
+    4. Document Service  : PASS on action=UPLOAD
+    5. OCR Service       : PASS on action=OCR_QUEUED
+    6. Extraction Service: PASS on action=EXTRACTION_QUEUED
+    7. Extraction Service: PASS on action=EXTRACTION_COMPLETED
 
 Each stage has its own independent 10-minute timeout that starts when
 the stage is entered — a slow OCR stage does not eat into the Extraction
@@ -81,13 +81,13 @@ PIPELINE_STAGES: list[PipelineStage] = [
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
-        service="Upload Service",
+        service="Document Service",
         description="Upload queued",
         action="UPLOAD_QUEUED",
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(
-        service="Upload Service",
+        service="Document Service",
         description="Upload completed",
         action="UPLOAD",
         timeout_s=STAGE_TIMEOUT_S,

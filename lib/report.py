@@ -543,7 +543,6 @@ def _logs_html(report: PipelineReport) -> str:
 _FLOW_STAGES: list[tuple[str, tuple[str, ...]]] = [
     ("Document Service", ("Document Service", "UI / Drive")),
     ("Event Hub",        ("Event Hub",)),
-    ("Upload",           ("Upload Service",)),
     ("OCR",              ("OCR Service",)),
     ("Extraction",       ("Extraction Service",)),
 ]

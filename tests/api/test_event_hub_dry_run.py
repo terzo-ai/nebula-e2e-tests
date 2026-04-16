@@ -41,7 +41,7 @@ async def test_event_hub_dry_run(config: E2EConfig) -> None:
     except ImportError:
         pytest.skip("azure-eventhub not installed")
 
-    hub_name = "terzo-ai-ocr-events"
+    hub_name = "terzo-ai-contract-document-events"
     consumer_group = config.event_hub_consumer_group
     partition_ids = ("0", "1", "2", "3")
 

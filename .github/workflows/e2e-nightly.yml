@@ -64,10 +64,32 @@ jobs:
           path: reports/
 
       - name: Send Slack notification
+        id: slack
         if: always() && vars.E2E_SLACK_NOTIFY != 'false' && hashFiles('reports/slack-payload.json') != ''
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
           token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
           payload-file-path: reports/slack-payload.json
+          errors: true
+
+      - name: Resolve pipeline report path
+        id: report
+        if: always() && steps.slack.outputs.ts != ''
+        run: |
+          FILE=$(ls reports/pipeline-*.html 2>/dev/null | head -1 || true)
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Attach pipeline report to Slack thread
+        if: always() && steps.slack.outputs.ts != '' && steps.report.outputs.file != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: files.uploadV2
+          token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
+          payload: |
+            channel_id: "${{ steps.slack.outputs.channel }}"
+            thread_ts: "${{ steps.slack.outputs.ts }}"
+            file: "${{ steps.report.outputs.file }}"
+            filename: "pipeline-report.html"
+            initial_comment: "Full pipeline report"
           errors: true

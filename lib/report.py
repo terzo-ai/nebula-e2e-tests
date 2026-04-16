@@ -103,12 +103,14 @@ class PipelineReport:
         environment: str,
         tenant_id: int,
         started_at: str | None = None,
+        github_actions_url: str = "",
     ) -> None:
         self.run_id = run_id
         self.environment = environment
         self.tenant_id = tenant_id
         self.started_at = started_at or datetime.now(timezone.utc).isoformat()
         self.ended_at: str | None = None
+        self.github_actions_url = github_actions_url
         self.documents: list[DocumentTrace] = []
         self._step_counter: dict[str, int] = {}
         self.errors: list[str] = []
@@ -1108,6 +1110,7 @@ def _render_html(report: PipelineReport) -> str:
         <div class="label">Wall Duration</div>
         <div class="value">{_fmt_duration(wall_duration_s)}</div>
       </div>
+      {f'<div class="meta-card"><div class="label">GitHub Actions</div><div class="value"><a href="{_esc(report.github_actions_url)}" target="_blank" rel="noopener">View Run</a></div></div>' if report.github_actions_url else ''}
     </div>
 
     <!-- Summary stats -->

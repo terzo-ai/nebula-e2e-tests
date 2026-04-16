@@ -1,4 +1,5 @@
 import logging
+import os
 import pathlib
 from datetime import datetime, timezone
 
@@ -88,11 +89,18 @@ async def event_listener(config: E2EConfig):
 @pytest.fixture(scope="session")
 def pipeline_report(config: E2EConfig, run_ctx: RunContext):
     """Collects pipeline step results across all tests, generates HTML report at teardown."""
+    # Build GitHub Actions run URL from standard env vars (set automatically in CI).
+    gh_server = os.environ.get("GITHUB_SERVER_URL", "")
+    gh_repo = os.environ.get("GITHUB_REPOSITORY", "")
+    gh_run_id = os.environ.get("GITHUB_RUN_ID", "")
+    gh_url = f"{gh_server}/{gh_repo}/actions/runs/{gh_run_id}" if gh_run_id else ""
+
     report = PipelineReport(
         run_id=run_ctx.run_id,
         environment=config.base_url,
         tenant_id=config.tenant_id,
         started_at=datetime.now(timezone.utc).isoformat(),
+        github_actions_url=gh_url,
     )
     # Stream log records into the report so the HTML log panel is populated.
     formatter = logging.Formatter("%(message)s")

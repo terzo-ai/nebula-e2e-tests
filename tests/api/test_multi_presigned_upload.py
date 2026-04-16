@@ -92,7 +92,7 @@ async def test_multi_presigned_upload_all_reach_extraction_queued(
             details="Presigned upload \u2192 Confirmed \u2713",
         )
         if event_listener:
-            event_listener.watch(ufid)
+            await event_listener.watch(ufid)
 
     # Step 2: Poll all documents until EXTRACTION_QUEUED (concurrently)
     results: list = []

@@ -119,28 +119,33 @@ class EventHubListener:
 
     async def __aenter__(self) -> EventHubListener:
         try:
-            from azure.eventhub.aio import EventHubConsumerClient
+            from azure.eventhub.aio import EventHubConsumerClient  # noqa: F401
         except ImportError:
             raise RuntimeError(
                 "azure-eventhub is required for Event Hub listening. "
                 "Install with: uv add azure-eventhub"
             )
+        self._EventHubConsumerClient = EventHubConsumerClient
+        return self
 
-        # Fail-safe: subscribe from N minutes before "now" so events emitted
-        # during the AMQP subscribe window are still replayed to us.
+    async def start(self) -> None:
+        """Start receive tasks on the CURRENT event loop.
+
+        Called explicitly from the test (not from __aenter__) so that
+        asyncio.create_task() binds to the test's event loop, not the
+        fixture's session-scoped loop which pytest-asyncio may run
+        separately.
+        """
+        if self._receive_tasks:
+            return  # already started
+
         self._starting_position = datetime.now(timezone.utc) - timedelta(
             minutes=self.STARTUP_LOOKBACK_MINUTES
         )
 
         for hub_name in self._event_hub_names:
-            # Create a separate consumer per partition. The Azure SDK's
-            # consumer.receive() uses an internal EventProcessor that holds
-            # a lock — calling receive() multiple times on the same consumer
-            # for different partitions causes all but the first to block
-            # silently (on_event never fires). One consumer per partition
-            # avoids this entirely.
             for partition_id in self._partition_ids:
-                consumer = EventHubConsumerClient.from_connection_string(
+                consumer = self._EventHubConsumerClient.from_connection_string(
                     self._connection_string,
                     consumer_group=self._consumer_group,
                     eventhub_name=hub_name,
@@ -158,11 +163,8 @@ class EventHubListener:
                 self._starting_position,
             )
 
-        # Give AMQP links time to open and subscribe before the caller fires
-        # the first producer-side request.
         if self.STARTUP_WARMUP_SECONDS > 0:
             await asyncio.sleep(self.STARTUP_WARMUP_SECONDS)
-        return self
 
     async def __aexit__(self, *exc: Any) -> None:
         for task in self._receive_tasks:
@@ -273,8 +275,13 @@ class EventHubListener:
                 hub_name, partition_id,
             )
 
-    def watch(self, ufid: str) -> None:
-        """Register a document ID to capture events for."""
+    async def watch(self, ufid: str) -> None:
+        """Register a document ID to capture events for.
+
+        Auto-starts receive tasks on first call so they bind to the
+        caller's event loop (not the fixture's).
+        """
+        await self.start()
         self._watched_ufids.add(ufid)
 
     @property

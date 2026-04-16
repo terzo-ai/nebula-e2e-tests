@@ -55,7 +55,7 @@ async def test_presigned_upload_reaches_extraction_queued(
     pipeline_report.add_document(ufid, filename)
 
     if event_listener:
-        event_listener.watch(ufid)
+        await event_listener.watch(ufid)
 
     pipeline_report.record_step(
         ufid, "UI / Drive",

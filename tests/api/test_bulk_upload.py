@@ -195,7 +195,7 @@ async def test_bulk_upload_full_pipeline(
             )
         pytest.skip("Event Hub not configured — pipeline event verification skipped")
 
-    event_listener.watch(ufid)
+    await event_listener.watch(ufid)
 
     aborted = False
     for stage_idx, stage in enumerate(PIPELINE_STAGES):

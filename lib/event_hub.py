@@ -126,11 +126,12 @@ class EventHubListener:
                 "Install with: uv add azure-eventhub"
             )
 
-        # Fail-safe: subscribe from N minutes before "now" so events emitted
-        # during the AMQP subscribe window are still replayed to us.
-        self._starting_position = datetime.now(timezone.utc) - timedelta(
-            minutes=self.STARTUP_LOOKBACK_MINUTES
-        )
+        # Use "@latest" so we only receive events emitted after we connect.
+        # A datetime-based starting_position is ignored by EventProcessor
+        # when no checkpoint exists for the consumer group, causing it to
+        # silently default to @latest anyway — but passing "@latest"
+        # explicitly avoids ambiguity.
+        self._starting_position = "@latest"
 
         for hub_name in self._event_hub_names:
             consumer = EventHubConsumerClient.from_connection_string(
@@ -152,7 +153,7 @@ class EventHubListener:
                 "Event Hub listener started: hub=%s group=%s partitions=%s "
                 "starting_from=%s",
                 hub_name, self._consumer_group, ",".join(self._partition_ids),
-                self._starting_position.isoformat(),
+                self._starting_position,
             )
 
         # Give AMQP links time to open and subscribe before the caller fires
@@ -254,8 +255,7 @@ class EventHubListener:
 
         logger.warning(
             "Starting receive loop: hub=%s partition=%s group=%s starting_from=%s",
-            hub_name, partition_id, self._consumer_group,
-            self._starting_position.isoformat() if self._starting_position else "None",
+            hub_name, partition_id, self._consumer_group, self._starting_position,
         )
         try:
             await consumer.receive(

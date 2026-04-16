@@ -63,19 +63,17 @@ async def test_event_hub_dry_run(config: E2EConfig) -> None:
         )
         event_id = payload.get("id", "")
 
-        print(
-            f"\n  [DRY-RUN #{event_count}] partition={partition_context.partition_id} "
-            f"seq={event.sequence_number}"
+        logger.warning(
+            "[DRY-RUN #%d] partition=%s seq=%s event_id=%s action=%s doc_id=%s",
+            event_count, partition_context.partition_id,
+            event.sequence_number, event_id, action, doc_id,
         )
-        print(f"    event_id : {event_id}")
-        print(f"    action   : {action}")
-        print(f"    doc_id   : {doc_id}")
-        print(f"    body     : {body[:800]}")
+        logger.warning("  body=%s", body[:800])
 
-    print(f"\n  Connecting to Event Hub: {hub_name}")
-    print(f"  Consumer group: {consumer_group}")
-    print(f"  Starting position: {starting_position.isoformat()}")
-    print(f"  Listening for {LISTEN_SECONDS}s...\n")
+    logger.warning("Connecting to Event Hub: %s", hub_name)
+    logger.warning("Consumer group: %s", consumer_group)
+    logger.warning("Starting position: %s", starting_position.isoformat())
+    logger.warning("Listening for %ds...", LISTEN_SECONDS)
 
     consumer = EventHubConsumerClient.from_connection_string(
         config.event_hub_connection_string,
@@ -108,8 +106,9 @@ async def test_event_hub_dry_run(config: E2EConfig) -> None:
                 pass
         await consumer.close()
 
-    print(f"\n  Done. Total events received: {event_count}")
+    logger.warning("Done. Total events received: %d", event_count)
 
-    # Don't fail — this is a diagnostic test.
     if event_count == 0:
-        print("  WARNING: Zero events received. Check connection string, hub name, and consumer group.")
+        logger.warning(
+            "Zero events received. Check connection string, hub name, and consumer group."
+        )

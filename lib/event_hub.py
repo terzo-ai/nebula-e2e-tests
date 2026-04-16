@@ -195,6 +195,12 @@ class EventHubListener:
             except (json.JSONDecodeError, Exception):
                 payload = {"_raw": event.body_as_str() if event else ""}
 
+            # Print raw event body for debugging — shows ALL inbound events
+            print(
+                f"  [EventHub RAW] hub={hub_name} partition={partition_context.partition_id} "
+                f"seq={event.sequence_number} body={body[:500]}"
+            )
+
             # Extract action, document ID, and CloudEvents id from the payload.
             data = payload.get("data", payload)
             action = data.get("action", "")

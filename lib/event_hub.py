@@ -126,12 +126,11 @@ class EventHubListener:
                 "Install with: uv add azure-eventhub"
             )
 
-        # Use "@latest" so we only receive events emitted after we connect.
-        # A datetime-based starting_position is ignored by EventProcessor
-        # when no checkpoint exists for the consumer group, causing it to
-        # silently default to @latest anyway — but passing "@latest"
-        # explicitly avoids ambiguity.
-        self._starting_position = "@latest"
+        # Fail-safe: subscribe from N minutes before "now" so events emitted
+        # during the AMQP subscribe window are still replayed to us.
+        self._starting_position = datetime.now(timezone.utc) - timedelta(
+            minutes=self.STARTUP_LOOKBACK_MINUTES
+        )
 
         for hub_name in self._event_hub_names:
             # Create a separate consumer per partition. The Azure SDK's

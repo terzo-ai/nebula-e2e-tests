@@ -134,16 +134,19 @@ class EventHubListener:
         self._starting_position = "@latest"
 
         for hub_name in self._event_hub_names:
-            consumer = EventHubConsumerClient.from_connection_string(
-                self._connection_string,
-                consumer_group=self._consumer_group,
-                eventhub_name=hub_name,
-            )
-            self._consumers.append(consumer)
-            # Fan out one receive task per partition. The "all partitions"
-            # path (no partition_id) is unreliable — per-partition receivers
-            # are the supported workaround.
+            # Create a separate consumer per partition. The Azure SDK's
+            # consumer.receive() uses an internal EventProcessor that holds
+            # a lock — calling receive() multiple times on the same consumer
+            # for different partitions causes all but the first to block
+            # silently (on_event never fires). One consumer per partition
+            # avoids this entirely.
             for partition_id in self._partition_ids:
+                consumer = EventHubConsumerClient.from_connection_string(
+                    self._connection_string,
+                    consumer_group=self._consumer_group,
+                    eventhub_name=hub_name,
+                )
+                self._consumers.append(consumer)
                 self._receive_tasks.append(
                     asyncio.create_task(
                         self._receive_loop(consumer, hub_name, partition_id)

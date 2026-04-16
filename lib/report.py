@@ -478,7 +478,7 @@ def _logs_html(report: PipelineReport) -> str:
         )
     body = '<div class="logs-body">' + "".join(rows) + '</div>'
     return (
-        '<details class="logs-panel" open>'
+        '<details class="logs-panel">'
         f'<summary>Session Logs <span class="panel-count">{len(report.logs)}</span>'
         f'<span class="log-chips">{chips}</span></summary>'
         + body +

@@ -205,6 +205,53 @@ class PipelineReport:
             return StepStatus.PARTIAL
         return StepStatus.PASS
 
+    def slack_summary(self) -> str:
+        """Build a Slack markdown summary of the pipeline run."""
+        _STATUS_EMOJI = {
+            StepStatus.PASS: ":white_check_mark:",
+            StepStatus.FAIL: ":x:",
+            StepStatus.PARTIAL: ":warning:",
+            StepStatus.SKIPPED: ":fast_forward:",
+            StepStatus.PENDING: ":hourglass:",
+        }
+        overall = self.overall_status
+        emoji = _STATUS_EMOJI.get(overall, ":grey_question:")
+
+        # Duration
+        dur = ""
+        if self.started_at and self.ended_at:
+            try:
+                start = datetime.fromisoformat(self.started_at)
+                end = datetime.fromisoformat(self.ended_at)
+                dur = f"  |  *Duration:* {_fmt_duration((end - start).total_seconds())}"
+            except Exception:
+                pass
+
+        lines = [
+            f":test_tube: *E2E Pipeline Report* — {emoji} {overall.value}",
+            f"*Run ID:* `{self.run_id}`  |  *Env:* {self.environment}{dur}",
+        ]
+        if self.github_actions_url:
+            lines.append(
+                f":link: <{self.github_actions_url}|View GitHub Actions Run>"
+            )
+        lines.append("")
+
+        for doc in self.documents:
+            doc_emoji = _STATUS_EMOJI.get(doc.overall_status, ":grey_question:")
+            lines.append(f"*UFID:* `{doc.ufid}` — {doc_emoji} {doc.overall_status.value}")
+            for step in doc.steps:
+                step_emoji = _STATUS_EMOJI.get(step.status, ":grey_question:")
+                lines.append(f"    {step_emoji} {step.service} — {step.description}")
+
+        if self.errors:
+            lines.append("")
+            lines.append(":rotating_light: *Errors:*")
+            for err in self.errors[:5]:
+                lines.append(f"    {err[:200]}")
+
+        return "\n".join(lines)
+
     def render_html(self) -> str:
         return _render_html(self)
 

@@ -116,6 +116,11 @@ def pipeline_report(config: E2EConfig, run_ctx: RunContext):
         path = report.save(output_dir / f"pipeline-{run_ctx.run_id}.html")
         print(f"\n  Pipeline report: {path}")
 
+        # Write Slack summary for the GitHub Action notification step.
+        summary_path = output_dir / "slack-summary.txt"
+        summary_path.write_text(report.slack_summary(), encoding="utf-8")
+        print(f"  Slack summary: {summary_path}")
+
 
 @pytest.fixture
 async def doc_client(config: E2EConfig, access_token: str) -> DocumentServiceClient:

@@ -76,3 +76,7 @@ class E2EConfig(BaseSettings):
 
     # Pipeline report
     report_output_dir: str = "reports"
+
+    # Slack notification (controlled via E2E_SLACK_NOTIFY GitHub variable).
+    # Set to false to skip Slack notifications.
+    slack_notify: bool = True

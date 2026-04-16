@@ -33,7 +33,7 @@ async def test_event_hub_dry_run(config: E2EConfig) -> None:
         pytest.skip("azure-eventhub not installed")
 
     hub_name = "terzo-ai-contract-document-events"
-    consumer_group = "$Default"
+    consumer_group = config.event_hub_consumer_group
     partition_ids = ("0", "1", "2", "3")
 
     # Start reading from 5 minutes ago to catch recent events.

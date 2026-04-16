@@ -71,7 +71,7 @@ class E2EConfig(BaseSettings):
     #   OCRM_EVENTHUB_CONSUMER_GROUP = terzo-ai-extraction-platform
     event_hub_connection_string: str = ""
     event_hub_name: str = "terzo-ai-contract-document-events"
-    event_hub_consumer_group: str = "terzo-ai-extraction-platform"
+    event_hub_consumer_group: str = "terzo-ai-nebula-e2e-tests-probe"
     event_hub_listen_timeout: float = 120.0
 
     # Pipeline report

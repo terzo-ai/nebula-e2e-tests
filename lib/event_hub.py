@@ -84,7 +84,7 @@ class EventHubListener:
         self,
         connection_string: str,
         event_hub_name: str | list[str],
-        consumer_group: str = "probe-test",
+        consumer_group: str = "terzo-ai-nebula-e2e-tests-probe",
         timeout: float = 120.0,
         partition_ids: list[str] | tuple[str, ...] | None = None,
     ) -> None:

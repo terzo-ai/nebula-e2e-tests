@@ -51,9 +51,10 @@ Two end-to-end paths against the Nebula gateway (`https://terzoai-gateway-dev.te
 
 - POST to `/api/v1/documents/bulk-upload` with a single `sourceUrl` item
 - Extract the `ufid` from the response
-- Listen to **all 5 child Event Hubs in parallel** for pipeline events tracked by `data.action` (UPLOADED → OCR_QUEUED → OCR_COMPLETED → EXTRACTION_QUEUED → EXTRACTION_COMPLETED → INGESTION_QUEUED → INGESTION_COMPLETED)
+- Listen to **all 5 child Event Hubs in parallel** for pipeline events tracked by `data.action` (UPLOAD_QUEUED → UPLOAD → OCR_QUEUED → EXTRACTION_QUEUED → EXTRACTION_COMPLETED)
 - Record each action as a **PASS / FAIL row** in the HTML pipeline report
 - If `action=FAILED` fires, mark remaining steps FAIL and surface the `failure_reason` payload field
+- Send a **Slack notification** with per-service pass/fail summary and GitHub Actions run link
 
 ### 2. Presigned SAS upload + pipeline progression (legacy)
 
@@ -109,14 +110,12 @@ Two end-to-end paths against the Nebula gateway (`https://terzoai-gateway-dev.te
        │   Each captured event becomes a row in the HTML pipeline report.
        │
        │   Tracked actions (data.action field):
-       │     UPLOADED                                          (Event Hub stage uses the
+       │     UPLOAD_QUEUED                                     (Event Hub stage uses the
        │                                                       first event — typically this)
+       │     UPLOAD
        │     OCR_QUEUED
-       │     OCR_COMPLETED
-       │     EXTRACTION_QUEUED / AI_EXTRACTION_QUEUED
-       │     EXTRACTION_COMPLETED / AI_EXTRACTION_COMPLETED
-       │     INGESTION_QUEUED
-       │     INGESTION_COMPLETED
+       │     EXTRACTION_QUEUED
+       │     EXTRACTION_COMPLETED
        │     FAILED   (short-circuits remaining stages to FAIL)
 ```
 
@@ -303,7 +302,8 @@ nebula-e2e-tests/
     │   ├── test_smoke.py                       # connectivity, auth, basic CRUD
     │   ├── test_single_presigned_upload.py     # 1 file → presigned-upload pipeline
     │   ├── test_multi_presigned_upload.py      # N files concurrent → presigned pipeline
-    │   └── test_bulk_upload.py                 # bulk-upload + 7-event Event Hub verification
+    │   ├── test_bulk_upload.py                 # bulk-upload + action-based Event Hub verification
+    │   └── test_event_hub_dry_run.py          # diagnostic: connect to Event Hub, print events
     └── ui/                            # Playwright tests (future)
 ```
 
@@ -355,13 +355,11 @@ The primary daily-run test. Submits one bulk-upload item, then watches Event Hub
 |------|---------|------------------------|-------------------|
 | 01 | **Document Service** | `POST /api/v1/documents/bulk-upload` → HTTP 202, ufid extracted | — |
 | 02 | **Event Hub** | First event captured for the ufid (proves listener wiring) | 600s |
-| 03 | **Upload Service** | `UPLOADED` | 600s |
-| 04 | **OCR Service** | `OCR_QUEUED` | 600s |
-| 05 | **OCR Service** | `OCR_COMPLETED` | 600s |
-| 06 | **Extraction Service** | `EXTRACTION_QUEUED` / `AI_EXTRACTION_QUEUED` | 600s |
-| 07 | **Extraction Service** | `EXTRACTION_COMPLETED` / `AI_EXTRACTION_COMPLETED` | 600s |
-| 08 | **Ingestion Service** | `INGESTION_QUEUED` | 600s |
-| 09 | **Ingestion Service** | `INGESTION_COMPLETED` | 600s |
+| 03 | **Upload Service** | `UPLOAD_QUEUED` | 600s |
+| 04 | **Upload Service** | `UPLOAD` | 600s |
+| 05 | **OCR Service** | `OCR_QUEUED` | 600s |
+| 06 | **Extraction Service** | `EXTRACTION_QUEUED` | 600s |
+| 07 | **Extraction Service** | `EXTRACTION_COMPLETED` | 600s |
 
 Each step becomes a row in `reports/pipeline-<run-id>.html` with PASS / FAIL / SKIPPED status.
 
@@ -505,14 +503,21 @@ All configuration is via environment variables (prefix `E2E_`) or a `.env` file.
 | `E2E_AUTH_USER_ID` | `1000129` | User ID claim |
 | `E2E_AUTH_EMAIL` | `paventhan@terzocloud.com` | Email claim |
 
-### Event Hub (optional — enables the 4-stage pipeline verification)
+### Event Hub (optional — enables pipeline event verification)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `E2E_EVENT_HUB_CONNECTION_STRING` | — | Namespace-scoped SAS connection string (secret). When unset, the bulk-upload test skips event verification. |
-| `E2E_EVENT_HUB_NAME` | `terzo-ai-contract-document-events` | Comma-separated list of child hub names. The listener fans out to each. Default matches `OCRM_EVENTHUB_NAME`. |
-| `E2E_EVENT_HUB_CONSUMER_GROUP` | `terzo-ai-extraction-platform` | Consumer group. Default matches `OCRM_EVENTHUB_CONSUMER_GROUP`. |
+| `E2E_EVENT_HUB_NAME` | `terzo-ai-contract-document-events` | Comma-separated list of child hub names. The listener fans out to each. |
+| `E2E_EVENT_HUB_CONSUMER_GROUP` | `terzo-ai-nebula-e2e-tests-probe` | Dedicated consumer group for E2E tests. Must exist on all hubs. |
 | `E2E_EVENT_HUB_LISTEN_TIMEOUT` | `120.0` | Default per-event wait timeout (overridden to 600s per stage by the bulk-upload test). |
+
+### Slack notification
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `E2E_SLACK_NOTIFY` | `true` | Set to `false` to skip Slack notifications. GitHub variable. |
+| `E2E_SLACK_BOT_TOKEN` | — | Slack Bot token (`xoxb-...`) with `chat:write` scope. GitHub secret. |
 
 ### Fixtures (legacy presigned-upload tests only)
 
@@ -704,6 +709,7 @@ Variables (Settings → Secrets and variables → Actions → Variables):
 | `E2E_BULK_UPLOAD_FILE_NAME` | `tz_nebula_e2e.pdf` |
 | `E2E_EVENT_HUB_NAME` | comma-separated list of 5 child hubs |
 | `E2E_ANALYTICS_EMAIL` | login email |
+| `E2E_SLACK_NOTIFY` | `true` (set to `false` to disable Slack) |
 
 Secrets:
 
@@ -714,6 +720,7 @@ Secrets:
 | `E2E_ANALYTICS_XSRF_TOKEN` | `X-XSRF-TOKEN` header value |
 | `E2E_ANALYTICS_COOKIE` | Cookie header value |
 | `E2E_EVENT_HUB_CONNECTION_STRING` | Namespace-scoped SAS string |
+| `E2E_SLACK_BOT_TOKEN` | Slack Bot token (`xoxb-...`) with `chat:write` scope |
 
 ### K8s Job (in-cluster execution)
 
@@ -745,16 +752,30 @@ Both workflows upload two artifacts on every run (success or failure):
 
 `lib/report.py` generates a self-contained `pipeline-<run-id>.html` at session teardown. For the bulk-upload test, the report lays out:
 
-- **Header**: run ID, environment (`base_url`), tenant, start time, overall PASS/FAIL
-- **Per-document table**: one row per recorded step with service / description / status / details
-- **Step details**: the timestamp, partition (`{hub-name}/{partition-id}`), and sequence number for each captured event
+- **Header**: run ID, environment (`base_url`), tenant, start time, overall PASS/FAIL, GitHub Actions run link
+- **Per-document flow graph**: horizontal stage progression (Document Service → Event Hub → Upload → OCR → Extraction) with PASS/FAIL/SKIPPED badges
+- **Event Hub event timeline**: table with Action, Event ID, Doc ID, partition, sequence number, and collapsible payload (auto-masked for secrets/SAS params)
+- **Session Logs**: collapsible panel with all logger output (collapsed by default)
 - **Errors banner**: any session-level failures (auth, fixture setup, etc.)
 
 Open the artifact directly in a browser — no server, no allure CLI needed.
 
+### Slack Notification
+
+After each E2E run, a Slack message is sent to channel `C0ARRGXRY5P` with:
+- Overall PASS/FAIL status with emoji
+- Run ID, environment, duration, GitHub Actions link
+- Per-UFID breakdown: each pipeline stage with pass/fail status
+
+Controlled by `E2E_SLACK_NOTIFY` GitHub variable (default: enabled). Set to `false` to disable. Requires `E2E_SLACK_BOT_TOKEN` secret.
+
 ### Event Hub multi-hub listening
 
-`lib/event_hub.py:EventHubListener` accepts a single hub name **or** a comma-separated list. Internally it spawns one `EventHubConsumerClient` per hub and merges captured events into a single `_events` list, so callers see one timeline. Partition IDs are namespaced as `{hub-name}/{partition-id}` (e.g. `terzo-ai-ocr-events/4`) so we can tell which child hub each event came from. Set `starting_position="@latest"`; the session-scoped `event_listener` fixture starts before any test body runs to avoid missing the first event.
+`lib/event_hub.py:EventHubListener` accepts a single hub name **or** a comma-separated list. Internally it creates one `EventHubConsumerClient` **per hub/partition pair** (5 hubs × 4 partitions = 20 consumers) and merges captured events into a single `_events` list, so callers see one timeline. Partition IDs are namespaced as `{hub-name}/{partition-id}` (e.g. `terzo-ai-ocr-events/2`) so we can tell which child hub each event came from.
+
+Events are tracked by `data.action` (e.g. `UPLOAD`, `OCR_QUEUED`, `EXTRACTION_COMPLETED`) and `data.document_id`, not by the CloudEvents `type` package path. The CloudEvents `id` field is also captured for traceability.
+
+Receive tasks are started lazily on the first `watch()` call (not during fixture setup) to ensure they bind to the test's event loop. The consumer group is `terzo-ai-nebula-e2e-tests-probe` — a dedicated group that avoids epoch-based ownership conflicts with the production extraction platform consumer.
 
 ---
 
@@ -792,15 +813,19 @@ Open the artifact directly in a browser — no server, no allure CLI needed.
 
 ### Reporting
 
-- **Pipeline event timeline visualization** — currently HTML report shows per-step status; add a horizontal timeline view from the captured event timestamps
-- **Slack / Teams notification on failure** — wire a webhook step to the workflows
 - **Trend dashboard** — historical pass-rate per service, mean pipeline duration
+- **Pipeline event timeline visualization** — horizontal timeline view from captured event timestamps
 
 ### Done in this iteration
 
 - ✅ Bulk-upload via Nebula gateway (`POST /nebula/document-service/api/v1/documents/bulk-upload`)
 - ✅ Two-step Analytics → auth-service token flow with manual `E2E_TOKEN` override
-- ✅ Multi-hub Event Hub listener (5 child hubs in parallel)
-- ✅ Per-event PASS/FAIL pipeline HTML report attributed to 4 services
+- ✅ Multi-hub Event Hub listener (5 child hubs × 4 partitions, per-partition consumers)
+- ✅ Action-based event tracking (`data.action` + `data.document_id` + CloudEvents `id`)
+- ✅ Dedicated consumer group (`terzo-ai-nebula-e2e-tests-probe`) to avoid ownership conflicts
+- ✅ Lazy receiver start (binds to test event loop, not fixture loop)
+- ✅ Per-event PASS/FAIL pipeline HTML report with flow graph, event timeline, GitHub Actions link
+- ✅ Slack notification on run completion (per-service status, ufid, GitHub Actions link)
+- ✅ `E2E_SLACK_NOTIFY` flag to control Slack notifications
 - ✅ K8s Job manifest aligned with current code
 - ✅ Self-diagnostic 4xx/5xx errors in auth and gateway clients

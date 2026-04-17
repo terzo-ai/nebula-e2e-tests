@@ -41,9 +41,13 @@ jobs:
         env:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}
-          # Manual bearer override. If unset, the two-step auth flow runs instead.
-          E2E_TOKEN: ${{ secrets.E2E_TOKEN }}
-          # Two-step auth flow (used when E2E_TOKEN is empty):
+          # `E2E_TOKEN` GitHub secret deliberately removed — scheduled
+          # runs now rely on the Python auto-mint (step 1 Analytics
+          # login → step 2 auth-service exchange). Step 2 only works
+          # from inside the Dev cluster, so on GitHub-hosted runners
+          # this will surface as a reachability error on step 2; the
+          # K8s CronJob is the supported scheduled-run path.
+          # Two-step auth flow (runs when E2E_TOKEN is empty):
           #   Step 1 — Analytics login
           E2E_ANALYTICS_EMAIL: ${{ vars.E2E_ANALYTICS_EMAIL }}
           E2E_ANALYTICS_PASSWORD: ${{ secrets.E2E_ANALYTICS_PASSWORD }}

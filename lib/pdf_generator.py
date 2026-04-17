@@ -1,0 +1,201 @@
+"""Generate a fresh Contract Agreement PDF for each E2E run.
+
+Bulk-upload is a content-addressed pipeline — if we ship the same bytes
+twice, downstream dedup can short-circuit the run. So every scheduled
+execution uploads a PDF whose bytes are unique to that run_id.
+
+The output is a single-page Master Services Agreement in the 30–60 KB
+range (well under the 1 MB cap), with enough real text that OCR +
+extraction have something meaningful to chew on:
+    - Party block (tenant + vendor)
+    - Effective date + run-id as Agreement Reference
+    - 3-row fee schedule table
+    - Clause paragraphs (Term, Payment, Confidentiality)
+    - Signature lines
+
+reportlab is the only heavy dep and is pure-Python; no system libs.
+"""
+
+from __future__ import annotations
+
+import io
+from datetime import datetime, timezone
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
+
+def generate_contract_pdf(run_id: str) -> bytes:
+    """Render the contract PDF to an in-memory bytes object.
+
+    The run_id is embedded in multiple places (Agreement Reference,
+    footer) so grep-style verification against OCR output is trivial.
+    """
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=LETTER,
+        leftMargin=0.75 * inch,
+        rightMargin=0.75 * inch,
+        topMargin=0.75 * inch,
+        bottomMargin=0.75 * inch,
+        title="Master Services Agreement",
+        author="Terzo AI Nebula E2E",
+        subject=f"E2E test contract — run {run_id}",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ContractTitle",
+        parent=styles["Title"],
+        fontSize=18,
+        spaceAfter=12,
+        alignment=1,  # centre
+    )
+    heading_style = ParagraphStyle(
+        "ClauseHeading",
+        parent=styles["Heading3"],
+        fontSize=11,
+        spaceBefore=10,
+        spaceAfter=4,
+    )
+    body_style = ParagraphStyle(
+        "ClauseBody",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=13,
+        spaceAfter=4,
+    )
+    meta_style = ParagraphStyle(
+        "Meta",
+        parent=styles["BodyText"],
+        fontSize=9,
+        textColor=colors.grey,
+        spaceAfter=2,
+    )
+
+    effective_date = datetime.now(timezone.utc).strftime("%B %d, %Y")
+
+    story: list = [
+        Paragraph("MASTER SERVICES AGREEMENT", title_style),
+        Paragraph(
+            f"<b>Agreement Reference:</b> {run_id}", meta_style
+        ),
+        Paragraph(
+            f"<b>Effective Date:</b> {effective_date}", meta_style
+        ),
+        Spacer(1, 10),
+        Paragraph(
+            "This Master Services Agreement (the \u201cAgreement\u201d) is entered "
+            "into by and between <b>Terzo AI, Inc.</b> (\u201cCustomer\u201d), a "
+            "Delaware corporation with its principal place of business at "
+            "548 Market Street, San Francisco, CA, and <b>Acme Integrations "
+            "LLC</b> (\u201cVendor\u201d), a limited liability company organized "
+            "under the laws of Delaware, collectively referred to as the "
+            "\u201cParties\u201d.",
+            body_style,
+        ),
+        Paragraph("1. Term", heading_style),
+        Paragraph(
+            "This Agreement shall commence on the Effective Date and "
+            "continue for an initial period of twelve (12) months, "
+            "automatically renewing for successive one-year terms unless "
+            "either Party provides written notice of non-renewal at least "
+            "thirty (30) days prior to the end of the then-current term.",
+            body_style,
+        ),
+        Paragraph("2. Fee Schedule", heading_style),
+        _fee_schedule_table(run_id),
+        Spacer(1, 8),
+        Paragraph("3. Payment", heading_style),
+        Paragraph(
+            "Vendor shall invoice Customer monthly in arrears. All "
+            "undisputed invoices shall be paid within thirty (30) days of "
+            "receipt. Late payments shall accrue interest at the lesser of "
+            "1.5% per month or the maximum rate permitted by applicable law.",
+            body_style,
+        ),
+        Paragraph("4. Confidentiality", heading_style),
+        Paragraph(
+            "Each Party shall treat as confidential any non-public "
+            "information received from the other Party and shall not "
+            "disclose such information to third parties without prior "
+            "written consent, except as required by law. This obligation "
+            "shall survive termination of this Agreement for three (3) "
+            "years.",
+            body_style,
+        ),
+        Spacer(1, 18),
+        _signature_table(),
+        Spacer(1, 12),
+        Paragraph(
+            f"Document generated by Nebula E2E suite · run_id={run_id}",
+            meta_style,
+        ),
+    ]
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _fee_schedule_table(run_id: str) -> Table:
+    """3-row fee table — the run_id is spliced into one SKU so the text
+    layer differs byte-for-byte per run even when reportlab deterministically
+    compresses identical content."""
+    data = [
+        ["Service", "SKU", "Monthly Fee (USD)"],
+        ["Platform Subscription", f"TZ-PLAT-{run_id[-6:].upper()}", "$ 12,500.00"],
+        ["Professional Services (40h)", "TZ-PS-40", "$  8,000.00"],
+        ["Premium Support", "TZ-SUP-PREM", "$  2,500.00"],
+    ]
+    table = Table(data, colWidths=[2.6 * inch, 2.2 * inch, 1.5 * inch])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e293b")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+                ("TOPPADDING", (0, 0), (-1, 0), 6),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#94a3b8")),
+                ("ALIGN", (2, 1), (2, -1), "RIGHT"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+                 [colors.white, colors.HexColor("#f1f5f9")]),
+            ]
+        )
+    )
+    return table
+
+
+def _signature_table() -> Table:
+    """Two-column signature block."""
+    data = [
+        ["CUSTOMER", "VENDOR"],
+        ["By: _________________________", "By: _________________________"],
+        ["Name: Paventhan Perumal", "Name: Jane Doe"],
+        ["Title: Director, Engineering", "Title: VP, Operations"],
+        ["Date: _______________________", "Date: _______________________"],
+    ]
+    table = Table(data, colWidths=[3.25 * inch, 3.25 * inch])
+    table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    return table

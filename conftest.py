@@ -5,13 +5,21 @@ from datetime import datetime, timezone
 
 import pytest
 
+from lib.api_clients.contract_drive import ContractDriveClient
 from lib.api_clients.document_service import DocumentServiceClient
 from lib.api_clients.gateway_document_service import GatewayDocumentServiceClient
 from lib.auth import fetch_access_token
 from lib.config import E2EConfig
 from lib.fixtures import FixtureFile, load_test_files
+from lib.pdf_generator import generate_contract_pdf
 from lib.report import PipelineReport
 from lib.run_context import RunContext
+from lib.source_upload import (
+    SourceUpload,
+    SourceUploadError,
+    delete_blob,
+    upload_contract_pdf,
+)
 
 
 @pytest.fixture(scope="session")
@@ -63,6 +71,63 @@ def test_files(config: E2EConfig) -> list[FixtureFile]:
 def sample_pdf(test_files: list[FixtureFile]) -> bytes:
     """First test file's content — for single-file tests."""
     return test_files[0].content
+
+
+@pytest.fixture(scope="session")
+def generated_contract_pdf(run_ctx: RunContext) -> bytes:
+    """Fresh 1-page Contract Agreement PDF bytes, unique to this run_id.
+
+    Keeps scheduled runs from hitting content-dedup in the pipeline. ~30–60 KB.
+    """
+    pdf = generate_contract_pdf(run_ctx.run_id)
+    print(f"\n  Generated contract PDF: {len(pdf)} bytes for run {run_ctx.run_id}")
+    return pdf
+
+
+@pytest.fixture(scope="session")
+def bulk_upload_source_url(
+    config: E2EConfig,
+    run_ctx: RunContext,
+    generated_contract_pdf: bytes,
+    pipeline_report: PipelineReport,
+):
+    """Upload the per-run PDF to Azure Blob and return a SAS URL that
+    bulk-upload's worker can fetch. Cleans up the blob at teardown.
+
+    Falls back to `config.bulk_upload_source_url` (the static pre-staged
+    URL) when the fixtures connection string isn't configured — keeps
+    local runs working without requiring the secret.
+    """
+    if not config.fixtures_connection_string:
+        msg = (
+            "E2E_FIXTURES_CONNECTION_STRING unset — using pre-staged URL "
+            f"{config.bulk_upload_source_url} (no per-run upload, no cleanup)."
+        )
+        print(f"\n  {msg}")
+        yield config.bulk_upload_source_url
+        return
+
+    try:
+        upload: SourceUpload = upload_contract_pdf(
+            content=generated_contract_pdf,
+            run_id=run_ctx.run_id,
+            connection_string=config.fixtures_connection_string,
+            container=config.upload_container,
+        )
+    except SourceUploadError as e:
+        # Record + re-raise so the session fails fast rather than running
+        # bulk-upload against a stale URL and hiding the real cause.
+        pipeline_report.record_error(f"Per-run source upload failed: {e}")
+        raise
+
+    print(
+        f"\n  Uploaded source PDF: {upload.container}/{upload.blob_name} "
+        f"→ SAS URL (2h TTL)"
+    )
+    try:
+        yield upload.sas_url
+    finally:
+        delete_blob(upload, connection_string=config.fixtures_connection_string)
 
 
 @pytest.fixture(scope="session")
@@ -129,6 +194,27 @@ def pipeline_report(config: E2EConfig, run_ctx: RunContext):
         payload_path.write_text(_json.dumps(slack_payload), encoding="utf-8")
         print(f"  Slack payload: {payload_path}")
 
+        # Always-on DM summary for paventhan@terzocloud.com. The workflow
+        # step that sends this is NOT gated by E2E_SLACK_NOTIFY — so
+        # paventhan gets a run_id + link on every scheduled run, even
+        # when channel notifications are disabled. Text-only payload;
+        # the workflow resolves the email to a user_id via
+        # users.lookupByEmail and fills in `channel` before posting.
+        dm_text = (
+            f":test_tube: *E2E run* `{run_ctx.run_id}` — "
+            f"{report.overall_status.value}"
+        )
+        if gh_url:
+            dm_text += f" · <{gh_url}|GitHub Actions run>"
+        dm_text += f"\nEnvironment: `{config.base_url}`"
+        dm_text += f"\nTenant: `{config.tenant_id}`"
+        dm_payload_path = output_dir / "slack-dm-payload.json"
+        dm_payload_path.write_text(
+            _json.dumps({"text": dm_text, "recipient_email": "paventhan@terzocloud.com"}),
+            encoding="utf-8",
+        )
+        print(f"  Slack DM payload (paventhan): {dm_payload_path}")
+
 
 @pytest.fixture
 async def doc_client(config: E2EConfig, access_token: str) -> DocumentServiceClient:
@@ -150,6 +236,32 @@ async def gateway_doc_client(
         base_url=config.base_url,
         tenant_id=config.tenant_id,
         access_token=access_token,
+    )
+    yield client
+    await client.close()
+
+
+@pytest.fixture
+async def contract_drive_client(
+    config: E2EConfig, pipeline_report: PipelineReport
+) -> ContractDriveClient:
+    """Client for the UI contract-drive upload endpoint on the Analytics host.
+
+    Uses CSRF double-submit auth — the XSRF token is sent as both the
+    header and the cookie, so only `E2E_ANALYTICS_XSRF_TOKEN` is needed.
+    Skips cleanly when unset so the test is self-explanatory in
+    environments where UI auth isn't configured.
+    """
+    if not config.analytics_xsrf_token:
+        msg = (
+            "UI contract-drive upload needs an XSRF token — set "
+            "E2E_ANALYTICS_XSRF_TOKEN"
+        )
+        pipeline_report.record_error(msg)
+        pytest.skip(msg)
+    client = ContractDriveClient(
+        base_url=config.analytics_base_url,
+        xsrf_token=config.analytics_xsrf_token,
     )
     yield client
     await client.close()

@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 
 
 FAILURE_ACTION = "FAILED"
+TEST_CASE_NAME = "Bulk Upload"
+
+# Markers: `-m e2e` runs the whole suite; `-m bulk_upload` targets just this file.
+pytestmark = [pytest.mark.e2e, pytest.mark.bulk_upload]
 
 
 @dataclass(frozen=True)
@@ -119,9 +123,16 @@ async def test_bulk_upload_full_pipeline(
     run_ctx: RunContext,
     event_listener: "EventHubListener | None",
     pipeline_report: PipelineReport,
+    bulk_upload_source_url: str,
+    generated_contract_pdf: bytes,
 ) -> None:
-    """Post one bulk-upload item and verify each pipeline stage."""
-    filename = config.bulk_upload_file_name
+    """Post one bulk-upload item and verify each pipeline stage.
+
+    The per-run `bulk_upload_source_url` fixture uploads a freshly
+    generated Contract Agreement PDF to Azure Blob and returns a 2h SAS
+    URL — so scheduled runs never collide with a stale / cached object.
+    """
+    filename = f"nebulae2etest-{run_ctx.run_id}.pdf"
 
     # ------------------------------------------------------------------
     # Stage 1 — Document Service: PASS when we get HTTP 202 + ufid.
@@ -131,9 +142,9 @@ async def test_bulk_upload_full_pipeline(
             BulkUploadItem(
                 name=filename,
                 content_type="application/pdf",
-                size_bytes=93160,
+                size_bytes=len(generated_contract_pdf),
                 document_type="GENERAL",
-                source_url=config.bulk_upload_source_url,
+                source_url=bulk_upload_source_url,
             ),
         ],
         source="BULK_IMPORT",
@@ -152,7 +163,12 @@ async def test_bulk_upload_full_pipeline(
 
     ufid = response.ufids[0]
     run_ctx.register(ufid)
-    pipeline_report.add_document(ufid, filename)
+    pipeline_report.add_document(
+        ufid,
+        filename,
+        test_case=TEST_CASE_NAME,
+        response_body=response.raw,
+    )
     print(
         f"\nbulk-upload → status={response.status_code} ufid={ufid} "
         f"raw={response.raw}"

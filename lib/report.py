@@ -62,8 +62,10 @@ class PipelineStep:
 class DocumentTrace:
     ufid: str
     filename: str
+    test_case: str = ""
     steps: list[PipelineStep] = field(default_factory=list)
     overall_status: StepStatus = StepStatus.PENDING
+    response_body: dict[str, Any] | None = None
 
     def compute_status(self) -> None:
         if not self.steps:
@@ -116,8 +118,19 @@ class PipelineReport:
         self.errors: list[str] = []
         self.logs: list[LogEntry] = []
 
-    def add_document(self, ufid: str, filename: str) -> DocumentTrace:
-        trace = DocumentTrace(ufid=ufid, filename=filename)
+    def add_document(
+        self,
+        ufid: str,
+        filename: str,
+        test_case: str = "",
+        response_body: dict[str, Any] | None = None,
+    ) -> DocumentTrace:
+        trace = DocumentTrace(
+            ufid=ufid,
+            filename=filename,
+            test_case=test_case,
+            response_body=response_body,
+        )
         self.documents.append(trace)
         self._step_counter[ufid] = 0
         return trace
@@ -237,12 +250,25 @@ class PipelineReport:
             )
         lines.append("")
 
-        for doc in self.documents:
-            doc_emoji = _STATUS_EMOJI.get(doc.overall_status, ":grey_question:")
-            lines.append(f"*UFID:* `{doc.ufid}` — {doc_emoji} {doc.overall_status.value}")
-            for step in doc.steps:
-                step_emoji = _STATUS_EMOJI.get(step.status, ":grey_question:")
-                lines.append(f"    {step_emoji} {step.service} — {step.description}")
+        # Group by test_case so the Slack summary matches the HTML layout.
+        groups = _group_by_test_case(self)
+        for test_case_name, docs in groups:
+            tc_status = _test_case_status(docs)
+            tc_emoji = _STATUS_EMOJI.get(tc_status, ":grey_question:")
+            lines.append(
+                f"*{test_case_name}* — {tc_emoji} {tc_status.value}  "
+                f"_({len(docs)} file{'s' if len(docs) != 1 else ''})_"
+            )
+            for doc in docs:
+                doc_emoji = _STATUS_EMOJI.get(doc.overall_status, ":grey_question:")
+                lines.append(
+                    f"  *UFID:* `{doc.ufid}` — {doc_emoji} {doc.overall_status.value}"
+                )
+                for step in doc.steps:
+                    step_emoji = _STATUS_EMOJI.get(step.status, ":grey_question:")
+                    lines.append(
+                        f"      {step_emoji} {step.service} — {step.description}"
+                    )
 
         if self.errors:
             lines.append("")
@@ -702,58 +728,98 @@ def _doc_flow_graph_html(doc: DocumentTrace) -> str:
     return '<div class="flow-graph">' + "".join(parts) + '</div>'
 
 
-# --- Main render -----------------------------------------------------------
+# --- Test-case grouping ----------------------------------------------------
+#
+# Documents are grouped by `DocumentTrace.test_case` so the report reflects
+# the logical test cases (e.g. "Bulk Upload", "UI File Upload endpoint")
+# rather than a flat list of UFIDs. Each test-case panel shows:
+#   - summary header: test case name, file count, overall status
+#   - optional response body (captured from the upload endpoint)
+#   - collapsible UFID cards; expanding a UFID reveals its pipeline flow
+#     graph + Event Hub timeline (the same content the flat list showed).
 
 
-def _render_html(report: PipelineReport) -> str:
-    overall = report.overall_status
-    banner_bg, _, banner_fg = _STATUS_COLORS[overall]
-
-    detail_sections = ""
+def _group_by_test_case(
+    report: PipelineReport,
+) -> list[tuple[str, list[DocumentTrace]]]:
+    """Group documents by test_case, preserving first-seen order."""
+    order: list[str] = []
+    buckets: dict[str, list[DocumentTrace]] = {}
     for doc in report.documents:
-        # Event timeline (captured events are attached to the last step in bulk-upload)
-        event_section = ""
-        events_for_doc: list[Any] = []
-        for step in doc.steps:
-            events_for_doc.extend(step.events)
-        if events_for_doc:
-            event_rows = ""
-            for ev in events_for_doc:
-                short_doc_id = str(ev.document_id)[:8] if ev.document_id else "-"
-                short_event_id = str(ev.event_id)[:12] if ev.event_id else "-"
-                payload_html = _payload_json_html(ev.payload)
-                event_rows += f"""
-                <tr>
-                  <td><code>{_esc(str(ev.received_at))}</code></td>
-                  <td><code>{_esc(str(ev.action))}</code></td>
-                  <td><code title="{_esc(str(ev.event_id))}">{_esc(short_event_id)}</code></td>
-                  <td><code title="{_esc(str(ev.document_id))}">{_esc(short_doc_id)}</code></td>
-                  <td>{_esc(str(ev.partition_id))}</td>
-                  <td>{_esc(str(ev.sequence_number))}</td>
-                  <td class="events-payload-cell">
-                    <details class="payload-toggle">
-                      <summary>view</summary>
-                      {payload_html}
-                    </details>
-                  </td>
-                </tr>"""
-            event_section = f"""
-            <div class="event-timeline">
-              <h4>Event Hub Events
-                <span class="payload-note">(payloads auto-masked — secrets/SAS params redacted)</span>
-              </h4>
-              <table class="events-table">
-                <thead><tr>
-                  <th>Received At</th><th>Action</th><th>Event ID</th>
-                  <th>Doc ID</th><th>Partition</th><th>Seq #</th><th>Payload</th>
-                </tr></thead>
-                <tbody>{event_rows}</tbody>
-              </table>
-            </div>"""
+        key = doc.test_case or "Uncategorized"
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(doc)
+    return [(name, buckets[name]) for name in order]
 
-        detail_sections += f"""
+
+def _test_case_status(docs: list[DocumentTrace]) -> StepStatus:
+    """Aggregate status across all documents in a test case."""
+    if not docs:
+        return StepStatus.PENDING
+    statuses = {d.overall_status for d in docs}
+    if StepStatus.FAIL in statuses:
+        return StepStatus.FAIL
+    if StepStatus.PARTIAL in statuses or StepStatus.PENDING in statuses:
+        return StepStatus.PARTIAL
+    if statuses == {StepStatus.SKIPPED}:
+        return StepStatus.SKIPPED
+    return StepStatus.PASS
+
+
+def _events_for_doc(doc: DocumentTrace) -> list[Any]:
+    events: list[Any] = []
+    for step in doc.steps:
+        events.extend(step.events)
+    return events
+
+
+def _event_timeline_html(events: list[Any]) -> str:
+    if not events:
+        return ""
+    event_rows = ""
+    for ev in events:
+        short_doc_id = str(ev.document_id)[:8] if ev.document_id else "-"
+        short_event_id = str(ev.event_id)[:12] if ev.event_id else "-"
+        payload_html = _payload_json_html(ev.payload)
+        event_rows += f"""
+            <tr>
+              <td><code>{_esc(str(ev.received_at))}</code></td>
+              <td><code>{_esc(str(ev.action))}</code></td>
+              <td><code title="{_esc(str(ev.event_id))}">{_esc(short_event_id)}</code></td>
+              <td><code title="{_esc(str(ev.document_id))}">{_esc(short_doc_id)}</code></td>
+              <td>{_esc(str(ev.partition_id))}</td>
+              <td>{_esc(str(ev.sequence_number))}</td>
+              <td class="events-payload-cell">
+                <details class="payload-toggle">
+                  <summary>view</summary>
+                  {payload_html}
+                </details>
+              </td>
+            </tr>"""
+    return f"""
+        <div class="event-timeline">
+          <h4>Event Hub Events
+            <span class="payload-note">(payloads auto-masked — secrets/SAS params redacted)</span>
+          </h4>
+          <table class="events-table">
+            <thead><tr>
+              <th>Received At</th><th>Action</th><th>Event ID</th>
+              <th>Doc ID</th><th>Partition</th><th>Seq #</th><th>Payload</th>
+            </tr></thead>
+            <tbody>{event_rows}</tbody>
+          </table>
+        </div>"""
+
+
+def _doc_card_html(doc: DocumentTrace) -> str:
+    """One collapsible UFID card — closed by default so users can
+    expand individual UFIDs to see their pipeline flow + events."""
+    event_section = _event_timeline_html(_events_for_doc(doc))
+    return f"""
         <div class="doc-section">
-          <details open>
+          <details>
             <summary>
               <span class="doc-ufid-chip" title="Universal File ID">UFID</span>
               <span class="doc-ufid">{_esc(doc.ufid)}</span>
@@ -769,6 +835,95 @@ def _render_html(report: PipelineReport) -> str:
             {event_section}
           </details>
         </div>"""
+
+
+def _test_case_response_html(docs: list[DocumentTrace]) -> str:
+    """Render captured upload-response bodies (e.g. UI file-upload response)
+    so they show up in the report per the requirement to 'capture the
+    response body and print it in report'."""
+    with_body = [d for d in docs if d.response_body is not None]
+    if not with_body:
+        return ""
+    blocks: list[str] = []
+    for doc in with_body:
+        blocks.append(
+            f'<div class="response-block">'
+            f'<div class="response-label">Response for '
+            f'<code>{_esc(doc.ufid)}</code> · '
+            f'<span class="response-file">{_esc(doc.filename)}</span></div>'
+            f'{_payload_json_html(doc.response_body)}'
+            f'</div>'
+        )
+    return (
+        '<div class="test-case-response">'
+        '<h4>Upload Response Body</h4>'
+        + "".join(blocks)
+        + '</div>'
+    )
+
+
+def _test_case_sections_html(report: PipelineReport) -> str:
+    """Top-level rendering: one collapsible panel per test case, with a
+    summary header (file count, status breakdown) and cascaded UFID cards.
+    """
+    groups = _group_by_test_case(report)
+    if not groups:
+        return ""
+
+    panels: list[str] = []
+    for test_case_name, docs in groups:
+        tc_status = _test_case_status(docs)
+        _, bg, fg = _STATUS_COLORS[tc_status]
+        status_counts: dict[StepStatus, int] = defaultdict(int)
+        for doc in docs:
+            status_counts[doc.overall_status] += 1
+        count_chips: list[str] = []
+        for status in (StepStatus.PASS, StepStatus.PARTIAL, StepStatus.FAIL,
+                       StepStatus.SKIPPED, StepStatus.PENDING):
+            n = status_counts.get(status, 0)
+            if n == 0:
+                continue
+            color, _, _ = _STATUS_COLORS[status]
+            count_chips.append(
+                f'<span class="tc-chip" style="color:{color};">'
+                f'{status.value} · {n}</span>'
+            )
+        chips_html = "".join(count_chips)
+
+        file_count = len(docs)
+        file_word = "file" if file_count == 1 else "files"
+        ufid_cards = "".join(_doc_card_html(doc) for doc in docs)
+        response_section = _test_case_response_html(docs)
+
+        panels.append(f"""
+        <details class="test-case-panel" open>
+          <summary class="test-case-summary">
+            <span class="tc-name">Pipeline Flow - {_esc(test_case_name)}</span>
+            <span class="tc-badge" style="background:{bg};color:{fg};">
+              {tc_status.value}
+            </span>
+            <span class="tc-meta">{file_count} {file_word} uploaded</span>
+            <span class="tc-chips">{chips_html}</span>
+          </summary>
+          <div class="test-case-body">
+            {response_section}
+            <div class="test-case-docs-label">
+              UFIDs ({file_count}) — click a UFID to expand its pipeline trace
+            </div>
+            {ufid_cards}
+          </div>
+        </details>""")
+    return "".join(panels)
+
+
+# --- Main render -----------------------------------------------------------
+
+
+def _render_html(report: PipelineReport) -> str:
+    overall = report.overall_status
+    banner_bg, _, banner_fg = _STATUS_COLORS[overall]
+
+    detail_sections = _test_case_sections_html(report)
 
     total_docs = len(report.documents)
     doc_counts = _doc_status_counts(report)
@@ -970,9 +1125,63 @@ def _render_html(report: PipelineReport) -> str:
     font-size: 18px; margin: 16px 0 12px;
     padding-top: 8px; border-top: 1px solid var(--border);
   }}
+
+  /* Test-case grouping — one collapsible panel per test case. */
+  .test-case-panel {{
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 10px; margin-bottom: 20px; overflow: hidden;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+  }}
+  .test-case-summary {{
+    padding: 16px 22px; cursor: pointer; display: flex;
+    align-items: center; gap: 14px; flex-wrap: wrap;
+    font-size: 15px; font-weight: 600; list-style: none;
+    background: #f8fafc; border-bottom: 1px solid var(--border);
+  }}
+  .test-case-summary::-webkit-details-marker {{ display: none; }}
+  .test-case-summary::before {{
+    content: "\u25B8 "; font-size: 11px; color: var(--gray);
+    margin-right: 2px; display: inline-block; width: 12px;
+  }}
+  .test-case-panel[open] > .test-case-summary::before {{ content: "\u25BE "; }}
+  .test-case-summary:hover {{ background: #f1f5f9; }}
+  .tc-name {{ font-size: 16px; color: #0f172a; }}
+  .tc-badge {{
+    display: inline-block; padding: 3px 10px; border-radius: 12px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }}
+  .tc-meta {{
+    font-size: 12px; color: var(--gray); font-weight: 500;
+  }}
+  .tc-chips {{
+    display: flex; gap: 10px; margin-left: auto; font-size: 11px;
+    font-weight: 700; letter-spacing: 0.04em;
+  }}
+  .tc-chip {{ text-transform: uppercase; }}
+  .test-case-body {{ padding: 18px 22px; }}
+  .test-case-docs-label {{
+    font-size: 11px; color: var(--gray); text-transform: uppercase;
+    letter-spacing: 0.06em; margin: 4px 0 10px;
+  }}
+  .test-case-response {{
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px; margin-bottom: 16px;
+  }}
+  .test-case-response h4 {{
+    font-size: 12px; color: var(--gray); text-transform: uppercase;
+    letter-spacing: 0.05em; margin-bottom: 8px;
+  }}
+  .response-block {{ margin-top: 8px; }}
+  .response-block:first-of-type {{ margin-top: 0; }}
+  .response-label {{
+    font-size: 12px; color: #334155; margin-bottom: 4px;
+  }}
+  .response-file {{ color: var(--gray); }}
+
   .doc-section {{
     background: var(--card-bg); border: 1px solid var(--border);
-    border-radius: 8px; margin-bottom: 16px; overflow: hidden;
+    border-radius: 8px; margin-bottom: 12px; overflow: hidden;
   }}
   .doc-section summary {{
     padding: 14px 20px; cursor: pointer; display: flex;
@@ -1214,7 +1423,8 @@ def _render_html(report: PipelineReport) -> str:
     {errors_section}
     {empty_state}
 
-    <!-- Per-document pipeline flow (kept at the bottom) -->
+    <!-- Per-test-case pipeline flow — each panel lists its UFIDs and
+         their pipeline flow + Event Hub timelines. -->
     <h2 class="section-heading">Pipeline Flow</h2>
     {detail_sections}
   </div>

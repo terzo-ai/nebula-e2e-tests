@@ -9,17 +9,23 @@ on:
     - cron: "33 14 * * *"   # 8:03 PM IST
   workflow_dispatch:
     inputs:
-      test_path:
-        description: "pytest path(s) to run (space-separated)"
-        type: string
-        default: "tests/api/test_bulk_upload.py"
+      test_marker:
+        description: "pytest -m tag to select which tests run"
+        type: choice
+        options:
+          - e2e            # all E2E tests (bulk_upload + ui_upload)
+          - bulk_upload    # just the gateway bulk-upload pipeline test
+          - ui_upload      # just the UI contract-drive upload test
+        default: e2e
 
 jobs:
   e2e-full:
     runs-on: ubuntu-latest
     environment: dev
     env:
-      TEST_PATH: ${{ inputs.test_path || 'tests/api/test_bulk_upload.py' }}
+      # Scheduled runs always hit the full `e2e` suite; workflow_dispatch
+      # can narrow to `bulk_upload` or `ui_upload` via the dropdown above.
+      TEST_MARKER: ${{ inputs.test_marker || 'e2e' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,7 +37,7 @@ jobs:
         run: uv sync
 
       - name: Run E2E tests
-        run: uv run pytest $TEST_PATH -v --timeout=3600 --alluredir=allure-results
+        run: uv run pytest tests/api/ -v -m "$TEST_MARKER" --timeout=3600 --alluredir=allure-results
         env:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}
@@ -50,6 +56,10 @@ jobs:
           E2E_EVENT_HUB_CONNECTION_STRING: ${{ secrets.E2E_EVENT_HUB_CONNECTION_STRING }}
           E2E_EVENT_HUB_NAME: ${{ vars.E2E_EVENT_HUB_NAME }}
           E2E_SLACK_CHANNEL_ID: ${{ vars.E2E_SLACK_CHANNEL_ID }}
+          # Per-run source upload target for bulk-upload. Same storage
+          # account as fixtures; blob lands at e2e-test-fixtures/
+          # nebulae2etest-<run_id>.pdf and is deleted at session teardown.
+          E2E_FIXTURES_CONNECTION_STRING: ${{ secrets.E2E_FIXTURES_CONNECTION_STRING }}
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -94,4 +104,52 @@ jobs:
             file: "${{ steps.report.outputs.file }}"
             filename: "pipeline-report.html"
             initial_comment: "Full pipeline report"
+          errors: true
+
+      # ----------------------------------------------------------------
+      # Always-on DM to paventhan@terzocloud.com.
+      #
+      # NOT gated by vars.E2E_SLACK_NOTIFY — this DM fires even when
+      # channel notifications are off, so the owner always gets a run_id
+      # + GitHub Actions link. The Python side emits `slack-dm-payload.json`
+      # with `{ text, recipient_email }`; here we resolve the email to a
+      # Slack user_id and post a DM.
+      # ----------------------------------------------------------------
+      - name: Lookup paventhan Slack user_id
+        id: dm_lookup
+        if: always() && hashFiles('reports/slack-dm-payload.json') != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: users.lookupByEmail
+          token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
+          payload: |
+            email: paventhan@terzocloud.com
+
+      - name: Build DM payload with resolved channel
+        id: dm_build
+        if: always() && steps.dm_lookup.outputs.user != ''
+        env:
+          USER_JSON: ${{ steps.dm_lookup.outputs.user }}
+        run: |
+          set -e
+          export USER_ID=$(echo "$USER_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          python3 - <<'PY'
+          import json, os
+          with open("reports/slack-dm-payload.json") as f:
+              payload = json.load(f)
+          payload["channel"] = os.environ["USER_ID"]
+          # Strip helper key so Slack doesn't reject unknown fields.
+          payload.pop("recipient_email", None)
+          with open("reports/slack-dm-final.json", "w") as f:
+              json.dump(payload, f)
+          PY
+        shell: bash
+
+      - name: DM paventhan with run summary
+        if: always() && hashFiles('reports/slack-dm-final.json') != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
+          payload-file-path: reports/slack-dm-final.json
           errors: true

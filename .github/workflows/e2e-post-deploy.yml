@@ -20,7 +20,7 @@ jobs:
         run: uv sync
 
       - name: Run API E2E tests
-        run: uv run pytest tests/api/test_bulk_upload.py -v --timeout=3600 --alluredir=allure-results
+        run: uv run pytest tests/api/ -v -m e2e --timeout=3600 --alluredir=allure-results
         env:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}
@@ -37,6 +37,7 @@ jobs:
           E2E_EVENT_HUB_CONNECTION_STRING: ${{ secrets.E2E_EVENT_HUB_CONNECTION_STRING }}
           E2E_EVENT_HUB_NAME: ${{ vars.E2E_EVENT_HUB_NAME }}
           E2E_SLACK_CHANNEL_ID: ${{ vars.E2E_SLACK_CHANNEL_ID }}
+          E2E_FIXTURES_CONNECTION_STRING: ${{ secrets.E2E_FIXTURES_CONNECTION_STRING }}
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -59,4 +60,44 @@ jobs:
           method: chat.postMessage
           token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
           payload-file-path: reports/slack-payload.json
+          errors: true
+
+      # Always-on DM to paventhan@terzocloud.com — NOT gated by
+      # E2E_SLACK_NOTIFY so the run owner gets a run_id + link even
+      # when channel notifications are disabled.
+      - name: Lookup paventhan Slack user_id
+        id: dm_lookup
+        if: always() && hashFiles('reports/slack-dm-payload.json') != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: users.lookupByEmail
+          token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
+          payload: |
+            email: paventhan@terzocloud.com
+
+      - name: Build DM payload with resolved channel
+        if: always() && steps.dm_lookup.outputs.user != ''
+        env:
+          USER_JSON: ${{ steps.dm_lookup.outputs.user }}
+        run: |
+          set -e
+          export USER_ID=$(echo "$USER_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          python3 - <<'PY'
+          import json, os
+          with open("reports/slack-dm-payload.json") as f:
+              payload = json.load(f)
+          payload["channel"] = os.environ["USER_ID"]
+          payload.pop("recipient_email", None)
+          with open("reports/slack-dm-final.json", "w") as f:
+              json.dump(payload, f)
+          PY
+        shell: bash
+
+      - name: DM paventhan with run summary
+        if: always() && hashFiles('reports/slack-dm-final.json') != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
+          payload-file-path: reports/slack-dm-final.json
           errors: true

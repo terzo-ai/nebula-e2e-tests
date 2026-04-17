@@ -11,6 +11,8 @@ dependencies = [
     "pydantic-settings>=2.7",
     "allure-pytest>=2.13",
     "azure-eventhub>=5.11",
+    "azure-storage-blob>=12.19",
+    "reportlab>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +25,11 @@ asyncio_mode = "auto"
 timeout = 600
 markers = [
     "slow: marks tests that take >60s (OCR processing)",
+    # Primary tag: every E2E test carries this so `-m e2e` runs the whole suite.
+    "e2e: end-to-end pipeline tests",
+    # Per-endpoint tags for targeting a single test case from CI.
+    "bulk_upload: bulk-upload gateway endpoint pipeline test",
+    "ui_upload: UI contract-drive file upload endpoint pipeline test",
 ]
 
 # Live log capture — surfaces logger.info/exception from lib.event_hub

@@ -16,12 +16,21 @@ class E2EConfig(BaseSettings):
     base_url: str = "https://mafia.terzocloud.com"
     tenant_id: int = 1000012
 
-    # Source URL for bulk-upload test fixtures (blob/file share already populated)
+    # Source URL for bulk-upload test fixtures (blob/file share already
+    # populated). Used only as a fallback when per-run upload is disabled
+    # or unavailable — scheduled runs now generate a fresh PDF and get
+    # this URL from the `bulk_upload_source_url` session fixture.
     bulk_upload_source_url: str = "https://stterzoaidev.file.core.windows.net/fs-terzo-ai-dev"
 
     # Filename used for the bulk-upload test payload. Override via
     # E2E_BULK_UPLOAD_FILE_NAME if you rotate the fixture file.
     bulk_upload_file_name: str = "tz_nebula_e2e.pdf"
+
+    # Azure Blob container where each run uploads its fresh contract PDF.
+    # Reuses `fixtures_connection_string`; blobs land at
+    # `{upload_container}/nebulae2etest-<run_id>.pdf` and are deleted at
+    # session teardown.
+    upload_container: str = "e2e-test-fixtures"
 
     # --- Auth (two-step flow) ---
     # Step 1: log into Analytics (public) with email/password to get an ACCESS_TOKEN.
@@ -58,6 +67,14 @@ class E2EConfig(BaseSettings):
     drive_client_id: str = "AI-001"
     drive_user_name: str = "AIEXTRACT"
     drive_password: str = ""
+
+    # UI contract-drive file upload (POST /_/api/contract-drive/{drive_id}/add).
+    # Runs against the Analytics/mafia host and uses the same session
+    # credentials as the Analytics login (X-XSRF-TOKEN + Cookie).
+    ui_upload_drive_id: int = 1
+    # File to send as the multipart `file` part. Override via
+    # E2E_UI_UPLOAD_FILE_NAME if you want a different fixture here.
+    ui_upload_file_name: str = "tz_nebula_e2e.pdf"
 
     # Polling & timeouts
     full_pipeline_timeout: int = 600

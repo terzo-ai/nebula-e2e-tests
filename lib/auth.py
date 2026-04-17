@@ -97,6 +97,65 @@ async def fetch_access_token(config: E2EConfig) -> str:
     return await fetch_auth_service_bearer(config, analytics_token)
 
 
+async def fetch_analytics_session_cookie(config: E2EConfig) -> str:
+    """POST the Analytics login and return the `x-access-token` cookie value.
+
+    The UI contract-drive endpoint (`/_/api/contract-drive/<id>/add`)
+    authenticates the caller via that cookie. Login itself only needs
+    the CSRF token (sent as both the `X-XSRF-TOKEN` header and the
+    `XSRF-TOKEN=<token>` cookie — no separate session cookie is
+    required beforehand). Max-Age on the cookie is ~24 h, so refetching
+    it per test run keeps the value fresh.
+    """
+    if not (config.analytics_email and config.analytics_password):
+        raise AuthError(
+            "analytics_email / analytics_password must be set "
+            "(E2E_ANALYTICS_EMAIL / E2E_ANALYTICS_PASSWORD) — cannot mint "
+            "the UI session cookie"
+        )
+    if not config.analytics_xsrf_token:
+        raise AuthError(
+            "analytics_xsrf_token must be set (E2E_ANALYTICS_XSRF_TOKEN) — "
+            "Analytics login requires a CSRF token"
+        )
+
+    url = f"{config.analytics_base_url.rstrip('/')}/_/api/auth/login/password"
+    headers = {
+        "Origin": config.analytics_base_url,
+        "Referer": f"{config.analytics_base_url.rstrip('/')}/login",
+        "Content-Type": "application/json",
+        "X-XSRF-TOKEN": config.analytics_xsrf_token,
+        "Cookie": f"XSRF-TOKEN={config.analytics_xsrf_token}",
+    }
+    body = {
+        "email": config.analytics_email,
+        "password": config.analytics_password,
+        "type": "b",
+    }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(url, headers=headers, json=body)
+        if resp.status_code >= 400:
+            raise AuthError(_format_http_error("Analytics login (UI cookie)", url, resp))
+
+    # httpx parses Set-Cookie into resp.cookies. Fall back to scanning the
+    # raw Set-Cookie headers for servers that emit odd cookie attributes.
+    cookie = resp.cookies.get("x-access-token")
+    if not cookie:
+        for set_cookie in resp.headers.get_list("set-cookie"):
+            first = set_cookie.split(";", 1)[0].strip()
+            name, _, value = first.partition("=")
+            if name.lower() == "x-access-token" and value:
+                cookie = value
+                break
+    if not cookie:
+        raise AuthError(
+            "x-access-token cookie not present in Analytics login response. "
+            f"Set-Cookie headers: {resp.headers.get_list('set-cookie')}"
+        )
+    return cookie
+
+
 def _format_http_error(label: str, url: str, resp: httpx.Response) -> str:
     """Format a 4xx/5xx response with the headers most often used to explain
     method / redirect / auth failures: Allow, Location, WWW-Authenticate.

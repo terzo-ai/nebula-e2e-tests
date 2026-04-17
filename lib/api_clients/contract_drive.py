@@ -3,10 +3,15 @@
 Target: POST {analytics_base_url}/_/api/contract-drive/{drive_id}/add
 
 Unlike the Nebula gateway clients, this endpoint lives on the Analytics/mafia
-host and is authenticated with a CSRF double-submit pattern: the same token
-value is sent in both the ``X-XSRF-TOKEN`` header and a ``XSRF-TOKEN=<token>``
-cookie. Only a single secret is needed — ``E2E_ANALYTICS_XSRF_TOKEN`` — and
-the cookie is derived from it here.
+host and uses two cookies to authenticate:
+
+    1. ``XSRF-TOKEN=<token>`` — the CSRF double-submit value (also sent as the
+       ``X-XSRF-TOKEN`` header).
+    2. ``x-access-token=<session>`` — the session cookie returned by the
+       Analytics login endpoint (``POST /_/api/auth/login/password``).
+
+Callers supply both pieces explicitly; the fixture in ``conftest.py`` mints a
+fresh session cookie per run via ``lib.auth.fetch_analytics_session_cookie``.
 
 The request is `multipart/form-data` with two parts:
     file   — binary file content
@@ -79,8 +84,10 @@ def _extract_ufid(data: Any) -> str | None:
 class ContractDriveClient:
     """Async client for `POST /_/api/contract-drive/{drive_id}/add`.
 
-    Uses CSRF double-submit auth: the same XSRF token is sent as both
-    the ``X-XSRF-TOKEN`` header and a ``XSRF-TOKEN=<token>`` cookie.
+    Auth = CSRF double-submit (X-XSRF-TOKEN header + XSRF-TOKEN cookie)
+    PLUS a session cookie (`x-access-token`) obtained from the Analytics
+    login. Callers pass both pieces in; the client assembles the Cookie
+    header as `XSRF-TOKEN=<xsrf>; x-access-token=<session>`.
     """
 
     UPLOAD_PATH_TEMPLATE = "/_/api/contract-drive/{drive_id}/add"
@@ -90,11 +97,14 @@ class ContractDriveClient:
         self,
         base_url: str,
         xsrf_token: str,
+        x_access_token: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._xsrf_token = xsrf_token
-        # CSRF double-submit: cookie value is the XSRF token itself.
-        self._cookie = f"XSRF-TOKEN={xsrf_token}"
+        parts = [f"XSRF-TOKEN={xsrf_token}"]
+        if x_access_token:
+            parts.append(f"x-access-token={x_access_token}")
+        self._cookie = "; ".join(parts)
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=60.0,

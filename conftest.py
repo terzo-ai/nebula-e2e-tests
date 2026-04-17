@@ -8,7 +8,11 @@ import pytest
 from lib.api_clients.contract_drive import ContractDriveClient
 from lib.api_clients.document_service import DocumentServiceClient
 from lib.api_clients.gateway_document_service import GatewayDocumentServiceClient
-from lib.auth import fetch_access_token
+from lib.auth import (
+    AuthError,
+    fetch_access_token,
+    fetch_analytics_session_cookie,
+)
 from lib.config import E2EConfig
 from lib.fixtures import FixtureFile, load_test_files
 from lib.pdf_generator import generate_contract_pdf
@@ -247,10 +251,11 @@ async def contract_drive_client(
 ) -> ContractDriveClient:
     """Client for the UI contract-drive upload endpoint on the Analytics host.
 
-    Uses CSRF double-submit auth — the XSRF token is sent as both the
-    header and the cookie, so only `E2E_ANALYTICS_XSRF_TOKEN` is needed.
-    Skips cleanly when unset so the test is self-explanatory in
-    environments where UI auth isn't configured.
+    Performs an Analytics login (`POST /_/api/auth/login/password`) with
+    the CSRF token to fetch a fresh `x-access-token` session cookie,
+    then hands both cookies to the client. Skips with a clear message
+    when any required input is missing, so the test is self-explanatory
+    in environments without UI auth configured.
     """
     if not config.analytics_xsrf_token:
         msg = (
@@ -259,9 +264,16 @@ async def contract_drive_client(
         )
         pipeline_report.record_error(msg)
         pytest.skip(msg)
+    try:
+        x_access_token = await fetch_analytics_session_cookie(config)
+    except AuthError as e:
+        msg = f"Analytics login failed — cannot fetch x-access-token: {e}"
+        pipeline_report.record_error(msg)
+        pytest.skip(msg)
     client = ContractDriveClient(
         base_url=config.analytics_base_url,
         xsrf_token=config.analytics_xsrf_token,
+        x_access_token=x_access_token,
     )
     yield client
     await client.close()

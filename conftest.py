@@ -117,9 +117,12 @@ def pipeline_report(config: E2EConfig, run_ctx: RunContext):
         print(f"\n  Pipeline report: {path}")
 
         # Write Slack payload JSON for the GitHub Action notification step.
+        # E2E_SLACK_CHANNEL_ID env var (wired from a GitHub repo/env variable)
+        # overrides the default when set.
+        slack_channel_id = os.environ.get("E2E_SLACK_CHANNEL_ID", "").strip() or "C0ARRGXRY5P"
         import json as _json
         slack_payload = {
-            "channel": "C0ARRGXRY5P",
+            "channel": slack_channel_id,
             "text": report.slack_summary(),
         }
         payload_path = output_dir / "slack-payload.json"

@@ -2,10 +2,11 @@ name: E2E Nightly (Dev)
 
 on:
   schedule:
-    # Twice daily — 12:00 AM IST (18:30 UTC) and 8:00 PM IST (14:30 UTC).
-    # Off-peak minutes to avoid GitHub's congested cron queue.
-    - cron: "33 18 * * *"   # 12:03 AM IST
-    - cron: "27 14 * * *"   # 7:57 PM IST
+    # Twice daily — 12:00 PM IST (06:30 UTC) and 8:00 PM IST (14:30 UTC).
+    # Off-peak minutes to dodge GitHub's congested cron queue.
+    # Note: GitHub scheduled workflows commonly run 15–90 min late under queue load.
+    - cron: "33 6 * * *"    # 12:03 PM IST
+    - cron: "33 14 * * *"   # 8:03 PM IST
   workflow_dispatch:
     inputs:
       test_path:
@@ -48,6 +49,7 @@ jobs:
           E2E_DRIVE_PASSWORD: ${{ secrets.E2E_DRIVE_PASSWORD }}
           E2E_EVENT_HUB_CONNECTION_STRING: ${{ secrets.E2E_EVENT_HUB_CONNECTION_STRING }}
           E2E_EVENT_HUB_NAME: ${{ vars.E2E_EVENT_HUB_NAME }}
+          E2E_SLACK_CHANNEL_ID: ${{ vars.E2E_SLACK_CHANNEL_ID }}
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -87,7 +89,7 @@ jobs:
           method: files.uploadV2
           token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
           payload: |
-            channel_id: "${{ steps.slack.outputs.channel }}"
+            channel_id: "${{ steps.slack.outputs.channel_id }}"
             thread_ts: "${{ steps.slack.outputs.ts }}"
             file: "${{ steps.report.outputs.file }}"
             filename: "pipeline-report.html"

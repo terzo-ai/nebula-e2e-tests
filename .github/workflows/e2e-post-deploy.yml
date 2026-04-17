@@ -72,16 +72,25 @@ jobs:
         with:
           method: users.lookupByEmail
           token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
+          errors: true
           payload: |
             email: paventhan@terzocloud.com
 
+      # slackapi@v2 only exposes `response` (full JSON) — no outputs.user —
+      # so we parse user.id out of response here.
       - name: Build DM payload with resolved channel
-        if: always() && steps.dm_lookup.outputs.user != ''
+        if: always() && steps.dm_lookup.outputs.response != ''
         env:
-          USER_JSON: ${{ steps.dm_lookup.outputs.user }}
+          DM_LOOKUP_RESPONSE: ${{ steps.dm_lookup.outputs.response }}
         run: |
           set -e
-          export USER_ID=$(echo "$USER_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          export USER_ID=$(echo "$DM_LOOKUP_RESPONSE" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("user",{}).get("id","") if d.get("ok") else "")')
+          if [ -z "$USER_ID" ]; then
+            echo "Could not resolve user_id from Slack lookup response:"
+            echo "$DM_LOOKUP_RESPONSE"
+            exit 1
+          fi
           python3 - <<'PY'
           import json, os
           with open("reports/slack-dm-payload.json") as f:

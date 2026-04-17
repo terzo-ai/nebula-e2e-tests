@@ -92,9 +92,20 @@ async def fetch_access_token(config: E2EConfig) -> str:
     """Run the full two-step flow and return the Nebula gateway bearer token.
 
     Called by the `access_token` pytest fixture when `config.token` is empty.
+
+    Step 1 — POST ``/_/api/auth/login/password`` with the CSRF token and
+             capture the ``x-access-token`` value from the response's
+             ``Set-Cookie`` header.
+    Step 2 — POST ``{auth_service_url}/auth/token`` with that cookie
+             value as the ``X-Access-Token`` header; the response JSON
+             contains ``{"token": "...<gateway bearer>..."}``.
+
+    Step 2's host is cluster-internal (``*.product-internal.terzocloud.com``)
+    and is only reachable from the Dev cluster / bastion — GitHub-hosted
+    runners must set ``E2E_TOKEN`` manually to short-circuit this flow.
     """
-    analytics_token = await fetch_analytics_access_token(config)
-    return await fetch_auth_service_bearer(config, analytics_token)
+    x_access_token = await fetch_analytics_session_cookie(config)
+    return await fetch_auth_service_bearer(config, x_access_token)
 
 
 async def fetch_analytics_session_cookie(config: E2EConfig) -> str:

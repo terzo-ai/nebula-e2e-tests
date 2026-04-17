@@ -41,12 +41,13 @@ jobs:
         env:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}
-          # `E2E_TOKEN` GitHub secret deliberately removed — scheduled
-          # runs now rely on the Python auto-mint (step 1 Analytics
-          # login → step 2 auth-service exchange). Step 2 only works
-          # from inside the Dev cluster, so on GitHub-hosted runners
-          # this will surface as a reachability error on step 2; the
-          # K8s CronJob is the supported scheduled-run path.
+          # Manual bearer override. GitHub-hosted runners can't reach
+          # auth-service-dev1 (a public-facing proxy redirects HTTP →
+          # HTTPS and responds 405), so Python's auto-mint flow does
+          # not work from GitHub Actions. Keep E2E_TOKEN set here.
+          # The K8s CronJob path auto-mints per run via its init
+          # container and does not need this secret.
+          E2E_TOKEN: ${{ secrets.E2E_TOKEN }}
           # Two-step auth flow (runs when E2E_TOKEN is empty):
           #   Step 1 — Analytics login
           E2E_ANALYTICS_EMAIL: ${{ vars.E2E_ANALYTICS_EMAIL }}

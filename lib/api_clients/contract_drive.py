@@ -119,8 +119,15 @@ class ContractDriveClient:
         filename: str,
         content: bytes,
         content_type: str = "application/pdf",
+        duplicate_action: str = "overwrite",
     ) -> ContractDriveAddResponse:
         """Upload a file to the contract-drive and return the parsed response.
+
+        The server dedups by filename and rejects duplicates with HTTP 400
+        unless the multipart body carries an ``action`` field telling it
+        how to resolve the conflict. Valid values are ``both``, ``overwrite``,
+        and ``ignore``; E2E tests default to ``overwrite`` so re-running is
+        idempotent.
 
         Raises RuntimeError on any non-2xx status, with diagnostic headers
         and a body snippet so failures are self-diagnostic.
@@ -134,7 +141,10 @@ class ContractDriveClient:
             "Cookie": self._cookie,
         }
         files = {"file": (filename, content, content_type)}
-        data = {"drive": json.dumps({"driveId": drive_id})}
+        data = {
+            "drive": json.dumps({"driveId": drive_id}),
+            "action": duplicate_action,
+        }
 
         resp = await self._client.post(
             path, headers=headers, files=files, data=data

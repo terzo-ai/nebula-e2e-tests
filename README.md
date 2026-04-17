@@ -13,7 +13,7 @@ End-to-end tests for the Nebula document processing pipeline — validates the f
 5. [Test File Sources](#test-file-sources)
 6. [Tech Stack](#tech-stack)
 7. [Project Structure](#project-structure)
-8. [Test Suite](#test-suite) — incl. [Bulk-Upload + Event-Hub Verification](#bulk-upload--event-hub-verification-test_bulk_uploadpy)
+8. [Test Suite](#test-suite) — incl. [Bulk-Upload + Event-Hub Verification](#bulk-upload--event-hub-verification-test_bulk_uploadpy), [UI File Upload](#ui-file-upload-test_ui_file_uploadpy), [Pytest markers](#pytest-markers-running-a-subset)
 9. [Run Tagging & Identification](#run-tagging--identification)
 10. [Cleanup](#cleanup)
 11. [Environment & Configuration](#environment--configuration) — gateway, bulk-upload, two-step auth, Event Hub
@@ -43,20 +43,31 @@ Services communicate asynchronously via **Azure Event Hub** (5 child hubs under 
 
 ## What This Repo Tests
 
-Two end-to-end paths against the Nebula gateway (`https://terzoai-gateway-dev.terzocloud.com/nebula/document-service`):
+Two end-to-end paths, selectable by **pytest marker**:
 
-### 1. Bulk-upload + full pipeline event verification (primary daily run)
+### 1. Bulk-upload + full pipeline event verification (`-m bulk_upload`)
 
-`tests/api/test_bulk_upload.py::test_bulk_upload_full_pipeline`:
+`tests/api/test_bulk_upload.py::test_bulk_upload_full_pipeline` — hits the Nebula gateway:
 
-- POST to `/api/v1/documents/bulk-upload` with a single `sourceUrl` item
+- Generate a fresh 1-page **Contract Agreement PDF** per run (run_id embedded in content → unique bytes, no dedup short-circuits)
+- Upload it to Azure Blob as `e2e-test-fixtures/nebulae2etest-<run_id>.pdf`, mint a 2h read-only blob-scope SAS URL, delete the blob at session teardown
+- POST to `/nebula/document-service/api/v1/documents/bulk-upload` with that SAS URL as the item's `sourceUrl`
 - Extract the `ufid` from the response
-- Listen to **all 5 child Event Hubs in parallel** for pipeline events tracked by `data.action` (UPLOAD_QUEUED → UPLOAD → OCR_QUEUED → EXTRACTION_QUEUED → EXTRACTION_COMPLETED)
+- Listen to **all 5 child Event Hubs in parallel** for pipeline events tracked by `data.action` (`UPLOAD_QUEUED → UPLOAD → OCR_QUEUED → EXTRACTION_QUEUED → EXTRACTION_COMPLETED`)
 - Record each action as a **PASS / FAIL row** in the HTML pipeline report
 - If `action=FAILED` fires, mark remaining steps FAIL and surface the `failure_reason` payload field
-- Send a **Slack notification** with per-service pass/fail summary and GitHub Actions run link
 
-### 2. Presigned SAS upload + pipeline progression (legacy)
+### 2. UI file upload (`-m ui_upload`)
+
+`tests/api/test_ui_file_upload.py::test_ui_file_upload_full_pipeline` — hits the Analytics/mafia host directly, as a browser would:
+
+- Log in to Analytics (`POST /_/api/auth/login/password`) with the CSRF token, pull the `x-access-token` session cookie from the response's `Set-Cookie` header
+- POST `multipart/form-data` to `/_/api/contract-drive/{drive_id}/add` with `file` + `drive={"driveId": <id>}` + `action=overwrite` (so repeat runs don't 400 on duplicate filenames)
+- Header auth = `X-XSRF-TOKEN` + `Cookie: XSRF-TOKEN=<xsrf>; x-access-token=<session>`
+- Capture the response body verbatim into the HTML report
+- When the response carries a `ufid`, watch the same pipeline stages bulk-upload does; otherwise record them SKIPPED
+
+### 3. Presigned SAS upload + pipeline progression (legacy)
 
 `tests/api/test_single_presigned_upload.py` and `test_multi_presigned_upload.py`:
 
@@ -64,6 +75,27 @@ Two end-to-end paths against the Nebula gateway (`https://terzoai-gateway-dev.te
 - Polls `processingState` through `CONFIRMED → OCR_QUEUED → OCR_COMPLETED → EXTRACTION_QUEUED`
 - Multi-file variants run with 3, 5, and 10 files concurrently
 - Smoke test (`test_smoke.py`) — connectivity, auth, basic CRUD
+
+Legacy tests are module-level `pytest.mark.skip`-ed today; only markers `-m e2e`, `-m bulk_upload`, `-m ui_upload` select the active suite.
+
+### Pytest markers — running a subset
+
+Every active test carries the `e2e` parent marker plus a per-endpoint marker.
+
+| Marker | Tests selected |
+|---|---|
+| `e2e` | Both `bulk_upload` + `ui_upload` (nightly default) |
+| `bulk_upload` | `tests/api/test_bulk_upload.py` |
+| `ui_upload` | `tests/api/test_ui_file_upload.py` |
+
+Local:
+```bash
+uv run pytest tests/api/ -v -m e2e          # both
+uv run pytest tests/api/ -v -m bulk_upload  # bulk only
+uv run pytest tests/api/ -v -m ui_upload    # UI only
+```
+
+GitHub Actions (`workflow_dispatch` dropdown on **E2E Nightly**) exposes the same three values; scheduled runs always use `-m e2e`.
 
 ---
 
@@ -470,12 +502,25 @@ All configuration is via environment variables (prefix `E2E_`) or a `.env` file.
 | `E2E_BASE_URL` | `https://mafia.terzocloud.com` | API base URL. In CI: `https://terzoai-gateway-dev.terzocloud.com` (gateway). The bulk-upload client appends its own `/nebula/document-service/api/v1` prefix. |
 | `E2E_TENANT_ID` | `1000012` | Tenant for Dev environment |
 
-### Bulk-upload payload
+### Bulk-upload payload (per-run Azure Blob SAS)
+
+The bulk-upload test **generates** its PDF per run (`lib/pdf_generator.py`) and **uploads** to Azure Blob at session setup, then deletes the blob at teardown. No static source URL is required in CI.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `E2E_BULK_UPLOAD_SOURCE_URL` | `https://stterzoaidev.file.core.windows.net/fs-terzo-ai-dev` | Source URL the worker pod fetches the test PDF from |
-| `E2E_BULK_UPLOAD_FILE_NAME` | `tz_nebula_e2e.pdf` | Filename used in the bulk-upload request |
+| `E2E_FIXTURES_CONNECTION_STRING` | — | **Required in CI.** Azure Storage account connection string. Used both for the per-run upload (mint SAS via `AccountKey`) and for loading fixtures. |
+| `E2E_UPLOAD_CONTAINER` | `e2e-test-fixtures` | Blob container the fresh per-run PDF is written to. Container must exist. |
+| `E2E_BULK_UPLOAD_SOURCE_URL` | `https://stterzoaidev.file.core.windows.net/fs-terzo-ai-dev` | **Fallback only.** Used when `E2E_FIXTURES_CONNECTION_STRING` is unset (local dev). Ignored in CI where per-run upload is active. |
+
+Each run's blob lands at `{container}/nebulae2etest-<run_id>.pdf` and is removed in the fixture's `finally` clause regardless of test outcome.
+
+### UI file upload payload
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `E2E_ANALYTICS_XSRF_TOKEN` | — | **Required.** CSRF token; sent as `X-XSRF-TOKEN` header and as the `XSRF-TOKEN=<token>` cookie. |
+| `E2E_ANALYTICS_EMAIL` / `E2E_ANALYTICS_PASSWORD` | — | **Required.** Used to log in (`POST /_/api/auth/login/password`); `x-access-token` from the response `Set-Cookie` becomes the session cookie for the contract-drive request. |
+| `E2E_UI_UPLOAD_DRIVE_ID` | `1` | Drive ID in the endpoint path: `/_/api/contract-drive/{drive_id}/add` |
 
 ### Auth — manual override (preferred when reachable)
 
@@ -492,8 +537,8 @@ All configuration is via environment variables (prefix `E2E_`) or a `.env` file.
 | `E2E_ANALYTICS_BASE_URL` | `https://mafia.terzocloud.com` | Analytics login host |
 | `E2E_ANALYTICS_EMAIL` | — | Login email |
 | `E2E_ANALYTICS_PASSWORD` | — | Login password (secret) |
-| `E2E_ANALYTICS_XSRF_TOKEN` | — | `X-XSRF-TOKEN` header value (secret) |
-| `E2E_ANALYTICS_COOKIE` | — | `Cookie` header value (secret) |
+| `E2E_ANALYTICS_XSRF_TOKEN` | — | `X-XSRF-TOKEN` value. Used as both the header and the derived `XSRF-TOKEN=<...>` cookie. (secret) |
+| `E2E_ANALYTICS_COOKIE` | — | **Deprecated.** Legacy pre-computed `Cookie` header. The new flow derives the cookie from `XSRF_TOKEN` and mints the `x-access-token` session cookie via the login call itself, so this env var is no longer needed for any active code path. |
 
 **Step 2 — auth-service token exchange** (Dev cluster only)
 
@@ -516,8 +561,9 @@ All configuration is via environment variables (prefix `E2E_`) or a `.env` file.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `E2E_SLACK_NOTIFY` | `true` | Set to `false` to skip Slack notifications. GitHub variable. |
-| `E2E_SLACK_BOT_TOKEN` | — | Slack Bot token (`xoxb-...`) with `chat:write` scope. GitHub secret. |
+| `E2E_SLACK_NOTIFY` | `true` | Set to `false` to silence the **channel** message. **DM to paventhan still fires.** GitHub variable. |
+| `E2E_SLACK_CHANNEL_ID` | `C0ARRGXRY5P` | Channel ID for the run summary. |
+| `E2E_SLACK_BOT_TOKEN` | — | Slack Bot token (`xoxb-...`). Required scopes: `chat:write`, `files:write` (for report upload), **`users:read.email`** (for the always-on DM lookup). GitHub secret + K8s Secret key `slack-bot-token`. |
 
 ### Fixtures (legacy presigned-upload tests only)
 
@@ -686,16 +732,18 @@ Raises `PollTimeoutError` with the last observed `processingState` if timeout is
 
 | Workflow | Trigger | What runs |
 |---|---|---|
-| `e2e-nightly.yml` | `cron: "0 3 * * *"` (3 AM UTC) + `workflow_dispatch` | `pytest tests/` (or whatever `test_path` input specifies) |
-| `e2e-post-deploy.yml` | `repository_dispatch [deploy-complete]` + `workflow_dispatch` | `pytest tests/api/` |
+| `e2e-nightly.yml` | `cron: "33 6,14 * * *"` (12:03 & 20:03 IST) + `workflow_dispatch` | `pytest tests/api/ -m $TEST_MARKER` (dropdown: `e2e` / `bulk_upload` / `ui_upload`) |
+| `e2e-post-deploy.yml` | `repository_dispatch [deploy-complete]` + `workflow_dispatch` | `pytest tests/api/ -m e2e` |
 
-The nightly workflow accepts a `test_path` input on manual dispatch:
+The nightly workflow accepts a `test_marker` input on manual dispatch — no need to pass file paths:
 
 ```bash
 gh workflow run e2e-nightly.yml \
   --repo terzo-ai/nebula-e2e-tests --ref main \
-  -f test_path=tests/api/test_bulk_upload.py
+  -f test_marker=bulk_upload   # or `ui_upload`, or `e2e`
 ```
+
+> **K8s CronJob caveat:** GitHub scheduled workflows commonly drift 15–90 min late (sometimes hours). For deterministic timing, use the `k8s/e2e-job.yml` `CronJob` instead — it fires on the cluster clock and auto-mints `E2E_TOKEN` via an init container. See the [K8s CronJob](#k8s-cronjob-primary-scheduler-for-in-cluster-runs) section.
 
 ### Required GitHub config
 
@@ -705,39 +753,61 @@ Variables (Settings → Secrets and variables → Actions → Variables):
 |---|---|
 | `E2E_BASE_URL` | `https://terzoai-gateway-dev.terzocloud.com` |
 | `E2E_TENANT_ID` | `1000012` |
-| `E2E_BULK_UPLOAD_SOURCE_URL` | `https://stterzoaidev.file.core.windows.net/.../tz_nebula_e2e.pdf` |
-| `E2E_BULK_UPLOAD_FILE_NAME` | `tz_nebula_e2e.pdf` |
 | `E2E_EVENT_HUB_NAME` | comma-separated list of 5 child hubs |
-| `E2E_ANALYTICS_EMAIL` | login email |
-| `E2E_SLACK_NOTIFY` | `true` (set to `false` to disable Slack) |
+| `E2E_ANALYTICS_EMAIL` | login email (used by Analytics login for the UI session cookie and the two-step auth flow) |
+| `E2E_SLACK_CHANNEL_ID` | channel ID for the run summary |
+| `E2E_SLACK_NOTIFY` | `true` / `false` — **gates channel message only; DM to paventhan always fires** |
 
 Secrets:
 
 | Name | Notes |
 |---|---|
-| `E2E_TOKEN` | Manually-minted bearer (workaround for GitHub runners not reaching internal auth-service) |
-| `E2E_ANALYTICS_PASSWORD` | Login password for two-step flow |
-| `E2E_ANALYTICS_XSRF_TOKEN` | `X-XSRF-TOKEN` header value |
-| `E2E_ANALYTICS_COOKIE` | Cookie header value |
+| `E2E_TOKEN` | Manually-minted gateway bearer (workaround for GitHub runners not reaching internal auth-service) |
+| `E2E_ANALYTICS_PASSWORD` | Login password |
+| `E2E_ANALYTICS_XSRF_TOKEN` | `X-XSRF-TOKEN` value (also used to derive the `XSRF-TOKEN=<...>` cookie) |
+| `E2E_FIXTURES_CONNECTION_STRING` | Azure Storage conn string — used both for legacy fixtures and for the per-run Contract PDF upload + SAS mint |
 | `E2E_EVENT_HUB_CONNECTION_STRING` | Namespace-scoped SAS string |
-| `E2E_SLACK_BOT_TOKEN` | Slack Bot token (`xoxb-...`) with `chat:write` scope |
+| `E2E_SLACK_BOT_TOKEN` | Slack Bot token — scopes: `chat:write`, `files:write`, `users:read.email` |
 
-### K8s Job (in-cluster execution)
+> **Retired from CI:** `E2E_BULK_UPLOAD_SOURCE_URL` and `E2E_BULK_UPLOAD_FILE_NAME` — per-run PDF generation + Azure Blob SAS upload makes them redundant. The filename is now derived as `nebulae2etest-<run_id>.pdf`. The source-URL env var survives only as a local-dev fallback default in `lib/config.py`; it's not read in CI.
+>
+> `E2E_ANALYTICS_COOKIE` is no longer required for the UI upload path (cookie is derived from the XSRF token + minted fresh per run via Analytics login). The existing `lib/auth.py::fetch_analytics_access_token` still reads it, but that legacy function is no longer on the critical path — `fetch_access_token` now uses the cookie-based `fetch_analytics_session_cookie` flow.
 
-`k8s/e2e-job.yml` runs the bulk-upload test from inside the Dev cluster, where the auth-service is reachable:
+### K8s CronJob (primary scheduler for in-cluster runs)
 
-```bash
-# Optional: enables event-hub verification
-kubectl create secret generic nebula-e2e-secrets -n terzo-squad \
-  --from-literal=event-hub-connection-string='Endpoint=sb://...'
+`k8s/e2e-job.yml` is a `batch/v1 CronJob` — **not** a one-shot Job. It runs twice daily on the cluster clock (which is not subject to GitHub's scheduled-workflow queue drift) and executes `pytest -m e2e` (both bulk-upload and UI upload).
 
-kubectl delete job nebula-e2e-tests -n terzo-squad --ignore-not-found
-kubectl apply -f k8s/e2e-job.yml
-kubectl logs -n terzo-squad -l app=nebula-e2e-tests -c fetch-token -f
-kubectl logs -n terzo-squad -l app=nebula-e2e-tests -c e2e -f
+```
+schedule: "33 6,14 * * *"    # 12:03 PM IST & 8:03 PM IST (UTC)
+concurrencyPolicy: Forbid    # never stack runs
+startingDeadlineSeconds: 600 # skip missed triggers older than 10m
 ```
 
-The init container POSTs to `auth-service-dev1` directly (with the static dev key) to mint a fresh bearer, writes it to a shared volume, and the main container picks it up as `E2E_TOKEN`. No GitHub secrets needed for token refresh in this path.
+**Create/update the K8s Secret** (idempotent — safe to re-run when values rotate):
+
+```bash
+kubectl -n terzo-squad create secret generic nebula-e2e-secrets \
+  --from-literal=event-hub-connection-string='<EH SAS>' \
+  --from-literal=fixtures-connection-string='<storage account conn string>' \
+  --from-literal=analytics-xsrf-token='<X-XSRF-TOKEN value>' \
+  --from-literal=slack-bot-token='xoxb-...' \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Every key is optional inside the CronJob — missing values degrade to SKIPPED rows, not errors.
+
+**Apply / trigger / follow logs:**
+
+```bash
+kubectl apply -f k8s/e2e-job.yml
+
+# one-off run without waiting for cron
+kubectl -n terzo-squad create job --from=cronjob/nebula-e2e-tests manual-$(date +%s)
+kubectl -n terzo-squad logs -l app=nebula-e2e-tests -c fetch-token -f
+kubectl -n terzo-squad logs -l app=nebula-e2e-tests -c e2e -f
+```
+
+The init container POSTs to `auth-service-dev1` (internal, cluster-only) to mint a fresh gateway bearer and writes it to a shared volume, which the main container reads as `E2E_TOKEN` — no GitHub `E2E_TOKEN` rotation needed for this path. After pytest completes, the pod posts an always-on DM to `paventhan@terzocloud.com` via `users.lookupByEmail` + `chat.postMessage` (stdlib `urllib`; not gated by `E2E_SLACK_NOTIFY`).
 
 ### Artifacts
 
@@ -750,24 +820,30 @@ Both workflows upload two artifacts on every run (success or failure):
 
 ### Pipeline HTML Report
 
-`lib/report.py` generates a self-contained `pipeline-<run-id>.html` at session teardown. For the bulk-upload test, the report lays out:
+`lib/report.py` generates a self-contained `pipeline-<run-id>.html` at session teardown. Layout:
 
 - **Header**: run ID, environment (`base_url`), tenant, start time, overall PASS/FAIL, GitHub Actions run link
-- **Per-document flow graph**: horizontal stage progression (Document Service → Event Hub → Upload → OCR → Extraction) with PASS/FAIL/SKIPPED badges
-- **Event Hub event timeline**: table with Action, Event ID, Doc ID, partition, sequence number, and collapsible payload (auto-masked for secrets/SAS params)
-- **Session Logs**: collapsible panel with all logger output (collapsed by default)
-- **Errors banner**: any session-level failures (auth, fixture setup, etc.)
+- **Summary stats + donut chart + per-service bars** — quick visual read
+- **Session logs** — collapsible panel with all logger output (collapsed by default)
+- **"Pipeline Flow - \<Test Case\>" panels** — one per test case (`Bulk Upload`, `UI File Upload endpoint`). Each panel shows:
+  - File count + per-UFID status chips
+  - **Captured response body** from the upload endpoint (auto-masked for secrets)
+  - **Collapsible UFID cards** — each card expands to reveal that UFID's stage-by-stage flow graph (Document Service → Event Hub → OCR → Extraction) and its Event Hub timeline with JSON payloads
+- **Errors banner** — any session-level failures (auth, fixture setup, etc.)
 
 Open the artifact directly in a browser — no server, no allure CLI needed.
 
 ### Slack Notification
 
-After each E2E run, a Slack message is sent to channel `C0ARRGXRY5P` with:
-- Overall PASS/FAIL status with emoji
-- Run ID, environment, duration, GitHub Actions link
-- Per-UFID breakdown: each pipeline stage with pass/fail status
+Two Slack outputs per run:
 
-Controlled by `E2E_SLACK_NOTIFY` GitHub variable (default: enabled). Set to `false` to disable. Requires `E2E_SLACK_BOT_TOKEN` secret.
+1. **Channel summary** (`E2E_SLACK_CHANNEL_ID`, default `C0ARRGXRY5P`) — grouped by test case (`Bulk Upload`, `UI File Upload endpoint`), per-UFID breakdown with per-stage pass/fail. Pipeline report HTML attached as a thread reply. Gated by `E2E_SLACK_NOTIFY` GitHub variable.
+2. **DM to `paventhan@terzocloud.com`** — always-on, **not** gated by `E2E_SLACK_NOTIFY`. Contains `run_id`, overall status, environment, tenant, and the GitHub Actions run link. Fires from both the GitHub Actions workflow and the K8s CronJob pod.
+
+Bot token (`E2E_SLACK_BOT_TOKEN` / K8s secret key `slack-bot-token`) requires the following scopes:
+- `chat:write` (channel message + DM)
+- `files:write` (attach HTML report to thread)
+- `users:read.email` (resolve `paventhan@terzocloud.com` → Slack user ID for the DM)
 
 ### Event Hub multi-hub listening
 
@@ -819,13 +895,17 @@ Receive tasks are started lazily on the first `watch()` call (not during fixture
 ### Done in this iteration
 
 - ✅ Bulk-upload via Nebula gateway (`POST /nebula/document-service/api/v1/documents/bulk-upload`)
-- ✅ Two-step Analytics → auth-service token flow with manual `E2E_TOKEN` override
+- ✅ UI file upload (`POST /_/api/contract-drive/{drive_id}/add`) with `action=overwrite` for idempotent re-runs
+- ✅ Per-run Contract Agreement PDF generation (reportlab, ~4 KB, run_id-unique bytes)
+- ✅ Per-run Azure Blob upload + SAS mint + teardown cleanup for bulk-upload `sourceUrl`
+- ✅ Two-step Analytics login → auth-service bearer flow, cookie-based (`x-access-token` from Set-Cookie)
+- ✅ Pytest markers for scoped runs (`-m e2e`, `-m bulk_upload`, `-m ui_upload`) — workflow dispatch dropdown wired
+- ✅ HTML report grouped by test case with collapsible per-UFID flow graphs + captured upload response body
 - ✅ Multi-hub Event Hub listener (5 child hubs × 4 partitions, per-partition consumers)
 - ✅ Action-based event tracking (`data.action` + `data.document_id` + CloudEvents `id`)
 - ✅ Dedicated consumer group (`terzo-ai-nebula-e2e-tests-probe`) to avoid ownership conflicts
 - ✅ Lazy receiver start (binds to test event loop, not fixture loop)
-- ✅ Per-event PASS/FAIL pipeline HTML report with flow graph, event timeline, GitHub Actions link
-- ✅ Slack notification on run completion (per-service status, ufid, GitHub Actions link)
-- ✅ `E2E_SLACK_NOTIFY` flag to control Slack notifications
-- ✅ K8s Job manifest aligned with current code
-- ✅ Self-diagnostic 4xx/5xx errors in auth and gateway clients
+- ✅ Channel Slack summary (grouped by test case) with HTML report attached in thread
+- ✅ **Always-on DM to `paventhan@terzocloud.com`** — not gated by `E2E_SLACK_NOTIFY`, fires from GitHub Actions workflows and the K8s CronJob pod alike
+- ✅ K8s CronJob (`schedule: 33 6,14 * * *`) — in-cluster schedule replaces GitHub cron queue drift
+- ✅ Self-diagnostic 4xx/5xx errors in auth, gateway, contract-drive, and blob-upload clients

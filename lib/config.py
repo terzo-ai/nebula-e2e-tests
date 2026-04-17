@@ -16,15 +16,11 @@ class E2EConfig(BaseSettings):
     base_url: str = "https://mafia.terzocloud.com"
     tenant_id: int = 1000012
 
-    # Source URL for bulk-upload test fixtures (blob/file share already
-    # populated). Used only as a fallback when per-run upload is disabled
-    # or unavailable — scheduled runs now generate a fresh PDF and get
-    # this URL from the `bulk_upload_source_url` session fixture.
+    # Fallback source URL for bulk-upload when per-run upload is
+    # unavailable (e.g. local dev without `E2E_FIXTURES_CONNECTION_STRING`).
+    # Scheduled runs never hit this — the `bulk_upload_source_url` session
+    # fixture generates + uploads a fresh PDF and returns its SAS URL.
     bulk_upload_source_url: str = "https://stterzoaidev.file.core.windows.net/fs-terzo-ai-dev"
-
-    # Filename used for the bulk-upload test payload. Override via
-    # E2E_BULK_UPLOAD_FILE_NAME if you rotate the fixture file.
-    bulk_upload_file_name: str = "tz_nebula_e2e.pdf"
 
     # Azure Blob container where each run uploads its fresh contract PDF.
     # Reuses `fixtures_connection_string`; blobs land at

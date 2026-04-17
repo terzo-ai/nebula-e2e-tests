@@ -163,13 +163,6 @@ spec:
               value: "https://terzoai-gateway-dev.terzocloud.com"
             - name: E2E_TENANT_ID
               value: "1000012"
-            # Bulk-upload payload — per-run source URL is generated from
-            # E2E_FIXTURES_CONNECTION_STRING below; the static URL is only
-            # used when that secret is absent.
-            - name: E2E_BULK_UPLOAD_SOURCE_URL
-              value: "https://stterzoaidev.file.core.windows.net/fs-terzo-ai-dev/nebula_e2e_test_files/tz_nebula_e2e.pdf"
-            - name: E2E_BULK_UPLOAD_FILE_NAME
-              value: "tz_nebula_e2e.pdf"
             # Event Hub: comma-separated list of the 5 child hubs under
             # the terzo-ai-nebula-events-dev namespace.
             - name: E2E_EVENT_HUB_NAME

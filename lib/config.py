@@ -42,8 +42,10 @@ class E2EConfig(BaseSettings):
     analytics_xsrf_token: str = ""  # via E2E_ANALYTICS_XSRF_TOKEN secret
     analytics_cookie: str = ""      # via E2E_ANALYTICS_COOKIE secret
 
-    # Step 2 — auth-service token exchange (reachable from Dev cluster)
-    auth_service_url: str = "https://auth-service-dev1.product-internal.terzocloud.com"
+    # Step 2 — auth-service token exchange. HTTP only (HTTPS on this host
+    # returns 405 for POST /auth/token). K8s init container uses the same
+    # http:// scheme; match it here so the auto-mint flow works.
+    auth_service_url: str = "http://auth-service-dev1.product-internal.terzocloud.com"
     auth_user_id: int = 1000129
     auth_email: str = "paventhan@terzocloud.com"
 

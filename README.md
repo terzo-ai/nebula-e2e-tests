@@ -72,10 +72,13 @@ Three end-to-end paths, selectable by **pytest marker**. Every test regenerates 
 `tests/api/test_ui_file_upload.py::test_ui_file_upload_full_pipeline` — hits the Analytics/mafia host directly, as a browser would:
 
 - Log in to Analytics (`POST /_/api/auth/login/password`) with the CSRF token, pull the `x-access-token` session cookie from the response's `Set-Cookie` header
-- POST `multipart/form-data` to `/_/api/contract-drive/{drive_id}/add` with `file` + `drive={"driveId": <id>}` + `action=overwrite` (so repeat runs don't 400 on duplicate filenames)
-- Header auth = `X-XSRF-TOKEN` + `Cookie: XSRF-TOKEN=<xsrf>; x-access-token=<session>`
-- Capture the response body verbatim into the HTML report
-- When the response carries a `ufid`, watch the same pipeline stages bulk-upload does; otherwise record them SKIPPED
+- 3-step upload, as the browser now does it:
+  1. `POST /_/api/contract-drive/{drive_id}/upload?fileName=&sizeBytes=&contentType=` with `{}` → returns `{ ufid, uploadUrl, expiresInSeconds }`
+  2. `PUT {uploadUrl}` with the PDF bytes (headers: `x-ms-blob-type: BlockBlob`, `Content-Type: application/pdf`) — goes direct to Azure Blob via SAS
+  3. `POST /_/api/contract-drive/{drive_id}/confirm-upload?ufid=&fileName=&sizeBytes=` with `{}` → enqueues ingestion
+- Header auth for steps 1/3 = `X-XSRF-TOKEN` + `Cookie: XSRF-TOKEN=<xsrf>; x-access-token=<session>`. Step 2 is unauthenticated — the SAS URL is self-authenticating, and the session cookie never reaches Azure.
+- Capture the init response body verbatim into the HTML report; the `ufid` is returned directly by step 1
+- When init surfaces the `ufid`, watch the same pipeline stages bulk-upload does; if it doesn't, fall back to a doc-reader filename lookup before recording stages SKIPPED
 
 ### 4. Legacy presigned-upload tests (disabled)
 
@@ -545,7 +548,7 @@ Each run's blob lands at `{container}/nebulae2etest-<run_id>.pdf` and is removed
 |----------|---------|-------------|
 | `E2E_ANALYTICS_XSRF_TOKEN` | — | **Required.** CSRF token; sent as `X-XSRF-TOKEN` header and as the `XSRF-TOKEN=<token>` cookie. |
 | `E2E_ANALYTICS_EMAIL` / `E2E_ANALYTICS_PASSWORD` | — | **Required.** Used to log in (`POST /_/api/auth/login/password`); `x-access-token` from the response `Set-Cookie` becomes the session cookie for the contract-drive request. |
-| `E2E_UI_UPLOAD_DRIVE_ID` | `1` | Drive ID in the endpoint path: `/_/api/contract-drive/{drive_id}/add` |
+| `E2E_UI_UPLOAD_DRIVE_ID` | `1` | Drive ID in the endpoint paths: `/_/api/contract-drive/{drive_id}/upload` + `/confirm-upload` |
 
 ### Auth — manual override (preferred when reachable)
 
@@ -919,7 +922,7 @@ Receive tasks are started lazily on the first `watch()` call (not during fixture
 ### Done in this iteration
 
 - ✅ Bulk-upload via Nebula gateway (`POST /nebula/file-ingestion/api/v1/documents/bulk-upload`)
-- ✅ UI file upload (`POST /_/api/contract-drive/{drive_id}/add`) with `action=overwrite` for idempotent re-runs
+- ✅ UI file upload via the 3-step contract-drive flow (`/upload` → Azure Blob PUT → `/confirm-upload`)
 - ✅ Per-run Contract Agreement PDF generation (reportlab, ~4 KB, run_id-unique bytes)
 - ✅ Per-run Azure Blob upload + SAS mint + teardown cleanup for bulk-upload `sourceUrl`
 - ✅ Two-step Analytics login → auth-service bearer flow, cookie-based (`x-access-token` from Set-Cookie)

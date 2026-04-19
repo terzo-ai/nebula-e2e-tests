@@ -116,16 +116,9 @@ class FileIngestionClient:
 
     async def upload_to_sas(self, sas_url: str, file_bytes: bytes, content_type: str = "application/pdf") -> None:
         """Upload file bytes directly to Azure Blob via the presigned SAS URL."""
-        async with httpx.AsyncClient(timeout=120.0) as raw_client:
-            resp = await raw_client.put(
-                sas_url,
-                content=file_bytes,
-                headers={
-                    "x-ms-blob-type": "BlockBlob",
-                    "Content-Type": content_type,
-                },
-            )
-            resp.raise_for_status()
+        from lib.blob_upload import put_to_sas_url
+
+        await put_to_sas_url(sas_url, file_bytes, content_type=content_type)
 
     async def confirm_upload(self, ufid: str) -> DocumentResponse:
         resp = await self._client.post(f"/api/v1/documents/{ufid}/confirm")

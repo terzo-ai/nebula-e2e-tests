@@ -73,13 +73,24 @@ def _add_scenario(
     ufid: str,
     fail_at_index: int | None = None,
     fail_reason: str = "",
+    skipped_from_index: int | None = None,
+    skip_reason: str = "",
 ) -> None:
-    """Append a 7-stage scenario. If ``fail_at_index`` is given, all stages
-    up to that index pass, the one at that index fails, and anything after
-    is marked PENDING (the pipeline stopped there)."""
+    """Append a 7-stage scenario.
+
+    * ``fail_at_index`` — stages up to that index PASS, the one at that
+      index FAILs, and later stages are marked PENDING (the run stopped).
+    * ``skipped_from_index`` — stages before that index PASS, the rest
+      are marked SKIPPED with ``skip_reason``. Used to model the "Event
+      Hub not configured" flow where the upload succeeded but downstream
+      stages couldn't be verified.
+    """
     report.add_document(ufid=ufid, filename=f"{ufid}.pdf", test_case=test_case)
     for idx, (service, description) in enumerate(_PIPELINE_STAGES):
-        if fail_at_index is None or idx < fail_at_index:
+        if skipped_from_index is not None and idx >= skipped_from_index:
+            status = StepStatus.SKIPPED
+            details = skip_reason or "downstream verification skipped"
+        elif fail_at_index is None or idx < fail_at_index:
             status = StepStatus.PASS
             details = ""
         elif idx == fail_at_index:
@@ -284,6 +295,131 @@ def test_multiple_failures_each_get_their_own_thread_section() -> None:
     assert "← FAILED HERE" in ui
     assert "extraction never completed" in bulk
     assert "event hub listener timed out" in ui
+
+
+# ---------------------------------------------------------------------------
+# Unverified scenarios — observability gap (e.g. Event Hub unwired).
+# ---------------------------------------------------------------------------
+
+
+def test_skipped_stages_roll_doc_up_to_partial() -> None:
+    """Sanity check: the HTML rollup treats SKIPPED as non-pass too, so
+    every consumer of ``DocumentTrace.overall_status`` stays honest."""
+    report = _make_report()
+    _add_scenario(
+        report,
+        test_case="UI File Upload",
+        ufid="ui-unverified",
+        skipped_from_index=1,
+        skip_reason="Event Hub not configured",
+    )
+    doc = report.documents[0]
+    assert doc.overall_status == StepStatus.PARTIAL
+
+
+def test_unverified_scenario_uses_yellow_header_and_counts() -> None:
+    report = _make_report()
+    _add_scenario(
+        report,
+        test_case="UI File Upload",
+        ufid="ui-unverified",
+        skipped_from_index=1,
+        skip_reason="Event Hub not configured",
+    )
+    _add_scenario(report, test_case="Bulk Upload", ufid="bu-1")
+
+    blocks = build_main_blocks(report)
+    header = _header_text(blocks)
+    assert header.startswith(":large_yellow_circle:")
+    assert "UNVERIFIED" in header
+    # 1 pass + 1 unverified → 1/2 passed, 1 unverified.
+    assert "1/2 passed" in header
+    assert "1 unverified" in header
+
+
+def test_unverified_scenario_surfaces_skip_reason_in_main() -> None:
+    report = _make_report()
+    _add_scenario(
+        report,
+        test_case="UI File Upload",
+        ufid="ui-upload-e2e-20260417-140838-723a6f",
+        skipped_from_index=1,
+        skip_reason="Event Hub not configured (E2E_EVENT_HUB_CONNECTION_STRING unset)",
+    )
+
+    blocks = build_main_blocks(report)
+    text = _collect_text(blocks)
+    # Scenario line uses the warning emoji and reports the stages-ran ratio
+    # plus the skip reason so on-call knows why it's yellow.
+    assert ":warning: *UI File Upload* — unverified" in text
+    assert "1/7 stages ran" in text
+    assert "Event Hub not configured" in text
+    # Full UFID still stays in the main message so on-call can pull logs.
+    assert "`ui-upload-e2e-20260417-140838-723a6f`" in text
+
+
+def test_unverified_thread_marks_first_skipped_stage() -> None:
+    report = _make_report()
+    _add_scenario(
+        report,
+        test_case="UI File Upload",
+        ufid="ui-unverified",
+        skipped_from_index=1,
+        skip_reason="Event Hub not configured",
+    )
+
+    blocks = build_thread_blocks(report)
+    section = _find_section_containing(blocks, "*UI File Upload*")
+    # Warning emoji in the scenario header (not the green check).
+    assert section.startswith(":warning: *UI File Upload*")
+    # Stage lines keep :fast_forward: for SKIPPED and flag the first one
+    # so the eye lands on where verification stopped.
+    assert ":fast_forward: Event Hub" in section
+    assert section.count("\u2190 NOT VERIFIED") == 1
+    # No FAILED HERE marker — this isn't a failure.
+    assert "FAILED HERE" not in section
+
+
+def test_fail_beats_unverified_in_overall_status() -> None:
+    report = _make_report()
+    _add_scenario(
+        report,
+        test_case="UI File Upload",
+        ufid="ui-unverified",
+        skipped_from_index=1,
+        skip_reason="Event Hub not configured",
+    )
+    _add_scenario(
+        report,
+        test_case="Bulk Upload",
+        ufid="bu-fail",
+        fail_at_index=6,
+        fail_reason="extraction never completed",
+    )
+
+    blocks = build_main_blocks(report)
+    header = _header_text(blocks)
+    # With any FAIL present the overall stays red, but the unverified
+    # tally is still surfaced so the yellow count is not lost.
+    assert header.startswith(":red_circle:")
+    assert "FAIL" in header
+    assert "1 unverified" in header
+
+
+def test_unverified_fallback_text_uses_yellow_circle() -> None:
+    report = _make_report()
+    _add_scenario(
+        report,
+        test_case="UI File Upload",
+        ufid="ui-unverified",
+        skipped_from_index=1,
+        skip_reason="Event Hub not configured",
+    )
+    _add_scenario(report, test_case="Bulk Upload", ufid="bu-1")
+
+    text = build_fallback_text(report)
+    assert text.startswith(":large_yellow_circle: E2E UNVERIFIED 1/2")
+    assert "UI File Upload unverified at Event Hub" in text
 
 
 # ---------------------------------------------------------------------------

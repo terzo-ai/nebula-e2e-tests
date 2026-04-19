@@ -583,5 +583,8 @@ def build_thread_blocks(report: PipelineReport) -> list[dict]:
 
 
 def build_thread_fallback_text(report: PipelineReport) -> str:
-    passed, total = _counts(report)
-    return f"Stage details — {passed}/{total} scenarios passed"
+    counts = _counts(report)
+    parts = [f"{counts.passed}/{counts.total} scenarios passed"]
+    if counts.unverified:
+        parts.append(f"{counts.unverified} unverified")
+    return "Stage details — " + ", ".join(parts)

@@ -1,14 +1,18 @@
 """Event Hub listener: captures pipeline events during E2E test execution.
 
 Connects to Azure Event Hub, listens for events matching watched document IDs,
-and captures them for assertion and reporting. Events are tracked by their
-``data.action`` field (e.g. UPLOADED, OCR_COMPLETED) and CloudEvents ``id``.
+and captures them for assertion and reporting. Events are tracked primarily
+by their CloudEvents ``type`` (e.g. ``com.terzo.document.ocr.queued``) since
+``type`` is guaranteed by the envelope and universally present, whereas
+``data.action`` is producer-specific and missing on events like
+``ocr.completed``. ``action`` is still captured for backward compatibility
+(the ``FAILED`` terminal action is detected via ``data.action``).
 
 Usage:
     async with EventHubListener(conn_str, hub_name) as listener:
         listener.watch(ufid)
         # ... run test pipeline ...
-        assert listener.has_event(ufid, "OCR_QUEUED")
+        assert listener.has_event_type(ufid, "com.terzo.document.ocr.queued")
         assert not listener.find_duplicates()
 """
 
@@ -28,8 +32,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CapturedEvent:
     event_id: str  # CloudEvents "id" field
-    action: str  # data.action (e.g. "OCR_COMPLETED")
-    document_id: str  # data.document_id
+    event_type: str  # CloudEvents "type" (e.g. "com.terzo.document.ocr.queued")
+    action: str  # data.action (e.g. "OCR_COMPLETED") — missing on some events
+    document_id: str  # CloudEvents "subject", falling back to data.document_id
     timestamp: float  # time.monotonic() when received
     received_at: str  # ISO 8601 wall-clock time
     sequence_number: int
@@ -38,12 +43,24 @@ class CapturedEvent:
 
 
 class EventTimeoutError(Exception):
-    def __init__(self, ufid: str, action: str, timeout: float):
+    """Raised when ``wait_for_event`` / ``wait_for_event_type`` time out.
+
+    ``matcher`` is the value we were waiting for — a ``data.action`` string
+    (e.g. ``OCR_QUEUED``) when called via :meth:`wait_for_event`, or a
+    CloudEvents ``type`` (e.g. ``com.terzo.document.ocr.queued``) when
+    called via :meth:`wait_for_event_type`.
+    """
+
+    def __init__(self, ufid: str, matcher: str, timeout: float):
         self.ufid = ufid
-        self.action = action
+        self.matcher = matcher
+        # Kept for backward compatibility with any caller that still reads
+        # ``.action`` on a timeout — all existing callers only format via
+        # ``str(e)`` so this alias is invisible to them.
+        self.action = matcher
         self.timeout = timeout
         super().__init__(
-            f"Timed out waiting for action '{action}' "
+            f"Timed out waiting for {matcher!r} "
             f"for document {ufid} after {timeout}s"
         )
 
@@ -207,15 +224,20 @@ class EventHubListener:
                 event.sequence_number, body[:500],
             )
 
-            # Extract action, document ID, and CloudEvents id from the payload.
+            # Extract CloudEvents id/type/subject + data.action from the payload.
+            # Prefer the CloudEvents-mandatory ``subject`` for document_id —
+            # producers disagree on the data field name (documentId / ufid /
+            # document_id), but ``subject`` is consistent across every hub.
             data = payload.get("data", payload)
+            event_id = payload.get("id", "")
+            event_type = payload.get("type", "")
             action = data.get("action", "")
             doc_id = (
-                data.get("documentId")
+                payload.get("subject")
+                or data.get("documentId")
                 or data.get("ufid")
                 or data.get("document_id", "")
             )
-            event_id = payload.get("id", "")
 
             # Diagnostic bookkeeping: count *every* inbound event so logs can
             # prove the receiver is actually live even when nothing matches a
@@ -226,14 +248,16 @@ class EventHubListener:
                 self._events_per_partition.get(part_key, 0) + 1
             )
             logger.debug(
-                "Inbound event: hub=%s partition=%s action=%s doc=%s id=%s seq=%s watched=%s",
-                hub_name, partition_context.partition_id, action, doc_id,
-                event_id, event.sequence_number, doc_id in self._watched_ufids,
+                "Inbound event: hub=%s partition=%s type=%s action=%s doc=%s id=%s seq=%s watched=%s",
+                hub_name, partition_context.partition_id, event_type, action,
+                doc_id, event_id, event.sequence_number,
+                doc_id in self._watched_ufids,
             )
 
             if doc_id in self._watched_ufids:
                 captured = CapturedEvent(
                     event_id=event_id,
+                    event_type=event_type,
                     action=action,
                     document_id=doc_id,
                     timestamp=time.monotonic(),
@@ -250,12 +274,13 @@ class EventHubListener:
                 # immediate set-then-clear could lose them.
                 self._new_event.set()
                 print(
-                    f"  [EventHub] id={event_id} action={action} "
-                    f"document_id={doc_id} partition={partition_context.partition_id}"
+                    f"  [EventHub] id={event_id} type={event_type} "
+                    f"action={action} document_id={doc_id} "
+                    f"partition={partition_context.partition_id}"
                 )
                 logger.info(
-                    "Captured event: hub=%s action=%s id=%s doc=%s partition=%s seq=%d",
-                    hub_name, action, event_id, doc_id,
+                    "Captured event: hub=%s type=%s action=%s id=%s doc=%s partition=%s seq=%d",
+                    hub_name, event_type, action, event_id, doc_id,
                     partition_context.partition_id, captured.sequence_number,
                 )
 
@@ -313,6 +338,25 @@ class EventHubListener:
             for e in self._events
         )
 
+    def has_event_type(
+        self, ufid: str, event_type: str | tuple[str, ...]
+    ) -> bool:
+        """Check if an event with a given CloudEvents ``type`` was captured.
+
+        Preferred over ``has_event`` (which keys on ``data.action``) because
+        ``type`` is present on every CloudEvents envelope and stays stable
+        across producer rewrites.
+        """
+        if isinstance(event_type, tuple):
+            return any(
+                e.document_id == ufid and e.event_type in event_type
+                for e in self._events
+            )
+        return any(
+            e.document_id == ufid and e.event_type == event_type
+            for e in self._events
+        )
+
     def actions_for(self, ufid: str) -> list[str]:
         """Distinct actions captured for a ufid, in arrival order.
 
@@ -324,6 +368,19 @@ class EventHubListener:
         for event in self.events_for(ufid):
             if event.action not in seen:
                 seen.append(event.action)
+        return seen
+
+    def types_for(self, ufid: str) -> list[str]:
+        """Distinct CloudEvents ``type`` values captured for a ufid.
+
+        The type-based analogue of ``actions_for`` — used by the pipeline
+        walker's heartbeat/timeout diagnostics so logs can show which
+        CloudEvents the producer has actually emitted.
+        """
+        seen: list[str] = []
+        for event in self.events_for(ufid):
+            if event.event_type not in seen:
+                seen.append(event.event_type)
         return seen
 
     def find_duplicates(self) -> list[tuple[CapturedEvent, CapturedEvent]]:
@@ -368,68 +425,115 @@ class EventHubListener:
         ``ufid`` (regardless of action) satisfies the wait.
         If ``action`` is a tuple, any of the listed actions satisfies the wait.
         """
+        return await self._wait_for_match(
+            ufid,
+            key=action,
+            timeout=timeout,
+            match_by="action",
+        )
+
+    async def wait_for_event_type(
+        self,
+        ufid: str,
+        event_type: str | tuple[str, ...],
+        timeout: float | None = None,
+    ) -> CapturedEvent:
+        """Block until an event with a matching CloudEvents ``type`` arrives.
+
+        Type-based analogue of :meth:`wait_for_event`. Used by the pipeline
+        walker as the primary stage gate since ``type`` is universally
+        present on the CloudEvents envelope.
+        """
+        return await self._wait_for_match(
+            ufid,
+            key=event_type,
+            timeout=timeout,
+            match_by="type",
+        )
+
+    async def _wait_for_match(
+        self,
+        ufid: str,
+        *,
+        key: str | tuple[str, ...],
+        timeout: float | None,
+        match_by: str,  # "action" | "type"
+    ) -> CapturedEvent:
         timeout = timeout or self._timeout
         deadline = time.monotonic() + timeout
         hubs = ",".join(self._event_hub_names)
-        action_label = action if action else "<any>"
+        label = key if key else "<any>"
+        observed = (
+            self.types_for(ufid) if match_by == "type" else self.actions_for(ufid)
+        )
         logger.info(
-            "Waiting for event: action=%s ufid=%s timeout=%.1fs "
+            "Waiting for event: %s=%s ufid=%s timeout=%.1fs "
             "(hubs=%s group=%s partitions=%s total_events=%d per_partition=%s "
-            "captured_actions_for_ufid=%s)",
-            action_label, ufid, timeout,
+            "captured_%ss_for_ufid=%s)",
+            match_by, label, ufid, timeout,
             hubs, self._consumer_group, ",".join(self._partition_ids),
             self._total_events_received, self._events_per_partition,
-            self.actions_for(ufid),
+            match_by, observed,
         )
         last_heartbeat = time.monotonic()
+
+        def _field(event: CapturedEvent) -> str:
+            return event.event_type if match_by == "type" else event.action
 
         def _matches(event: CapturedEvent) -> bool:
             if event.document_id != ufid:
                 return False
-            if not action:
+            if not key:
                 return True
-            if isinstance(action, tuple):
-                return event.action in action
-            return event.action == action
+            value = _field(event)
+            if isinstance(key, tuple):
+                return value in key
+            return value == key
 
         while True:
             for event in self._events:
                 if _matches(event):
                     logger.info(
-                        "Resolved event: action=%s ufid=%s actual_action=%s "
+                        "Resolved event: %s=%s ufid=%s actual=%s "
                         "id=%s hub=%s partition=%s seq=%d",
-                        action_label, ufid, event.action, event.event_id,
+                        match_by, label, ufid, _field(event), event.event_id,
                         hubs, event.partition_id, event.sequence_number,
                     )
                     return event
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                observed = (
+                    self.types_for(ufid) if match_by == "type"
+                    else self.actions_for(ufid)
+                )
                 logger.warning(
-                    "Timed out waiting for event: action=%s ufid=%s after %.1fs "
+                    "Timed out waiting for event: %s=%s ufid=%s after %.1fs "
                     "(hubs=%s group=%s total_events=%d per_partition=%s "
-                    "captured_for_ufid=%d captured_actions_for_ufid=%s)",
-                    action_label, ufid, timeout,
+                    "captured_for_ufid=%d captured_%ss_for_ufid=%s)",
+                    match_by, label, ufid, timeout,
                     hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
-                    len(self.events_for(ufid)),
-                    self.actions_for(ufid),
+                    len(self.events_for(ufid)), match_by, observed,
                 )
-                raise EventTimeoutError(ufid, str(action) or "<any>", timeout)
+                raise EventTimeoutError(ufid, str(key) or "<any>", timeout)
 
             # Periodic heartbeat so a long wait is observable in logs rather
             # than appearing hung.
             now = time.monotonic()
             if now - last_heartbeat >= self.WAIT_HEARTBEAT_SECONDS:
+                observed = (
+                    self.types_for(ufid) if match_by == "type"
+                    else self.actions_for(ufid)
+                )
                 logger.info(
-                    "Still waiting: action=%s ufid=%s elapsed=%.0fs remaining=%.0fs "
+                    "Still waiting: %s=%s ufid=%s elapsed=%.0fs remaining=%.0fs "
                     "(hubs=%s group=%s total_events=%d per_partition=%s "
-                    "captured_for_ufid=%d captured_actions_for_ufid=%s)",
-                    action_label, ufid, timeout - remaining, remaining,
+                    "captured_for_ufid=%d captured_%ss_for_ufid=%s)",
+                    match_by, label, ufid, timeout - remaining, remaining,
                     hubs, self._consumer_group,
                     self._total_events_received, self._events_per_partition,
-                    len(self.events_for(ufid)),
-                    self.actions_for(ufid),
+                    len(self.events_for(ufid)), match_by, observed,
                 )
                 last_heartbeat = now
 

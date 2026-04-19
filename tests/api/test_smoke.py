@@ -7,7 +7,7 @@ Remove the module-level `pytestmark` below to re-enable.
 import httpx
 import pytest
 
-from lib.api_clients.document_service import DocumentServiceClient
+from lib.api_clients.file_ingestion import FileIngestionClient
 from lib.config import E2EConfig
 
 pytestmark = pytest.mark.skip(
@@ -28,14 +28,14 @@ class TestConnectivity:
 
 class TestAuth:
 
-    async def test_can_list_documents(self, doc_client: DocumentServiceClient) -> None:
+    async def test_can_list_documents(self, doc_client: FileIngestionClient) -> None:
         data = await doc_client.list_documents(size=1)
         assert "content" in data, f"Unexpected response: {data}"
 
 
 class TestBasicApiOperations:
 
-    async def test_initiate_upload(self, doc_client: DocumentServiceClient) -> None:
+    async def test_initiate_upload(self, doc_client: FileIngestionClient) -> None:
         upload = await doc_client.initiate_upload(
             name="e2e-smoke-test.pdf",
             content_type="application/pdf",
@@ -46,7 +46,7 @@ class TestBasicApiOperations:
         assert "blob.core.windows.net" in upload.upload_url
 
     async def test_get_nonexistent_document_returns_404(
-        self, doc_client: DocumentServiceClient,
+        self, doc_client: FileIngestionClient,
     ) -> None:
         resp = await doc_client._client.get(
             "/api/v1/documents/00000000-0000-0000-0000-000000000000"

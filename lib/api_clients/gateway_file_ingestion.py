@@ -1,8 +1,8 @@
-"""Gateway-based client for the Nebula document-service.
+"""Gateway-based client for the Nebula file-ingestion service.
 
 `base_url` is the bare gateway host (e.g. `https://terzoai-gateway-dev.terzocloud.com`).
-The service-path prefix `/nebula/document-service/api/v1` is added by the client,
-so requests land at `{base_url}/nebula/document-service/api/v1/...`.
+The service-path prefix `/nebula/file-ingestion/api/v1` is added by the client,
+so requests land at `{base_url}/nebula/file-ingestion/api/v1/...`.
 In CI, `base_url` is driven by the E2E_BASE_URL repo variable.
 """
 
@@ -26,15 +26,59 @@ class BulkUploadItem:
     size_bytes: int
     document_type: str
     source_url: str
+    processing_mode: str = "EXTRACT"
 
     def to_json(self) -> dict[str, Any]:
         return {
             "name": self.name,
+            "processingMode": self.processing_mode,
             "contentType": self.content_type,
             "sizeBytes": self.size_bytes,
             "documentType": self.document_type,
             "sourceUrl": self.source_url,
         }
+
+
+@dataclass
+class PresignedUploadInitiation:
+    """Parsed response from POST /api/v1/documents/upload.
+
+    The server reserves a ufid, writes a pending row, and hands back a
+    time-limited Azure Blob SAS URL that the caller PUTs the file bytes to.
+    `raw` retains the full decoded body for report/debug inspection.
+    """
+
+    ufid: str
+    upload_url: str
+    expires_at: str
+    blob_path: str
+    raw: dict[str, Any] = field(default_factory=dict)
+    status_code: int = 0
+
+    @classmethod
+    def from_json(cls, data: Any, status_code: int = 0) -> "PresignedUploadInitiation":
+        src = data if isinstance(data, dict) else {}
+        return cls(
+            ufid=str(src.get("ufid", "")),
+            upload_url=str(src.get("uploadUrl", "")),
+            expires_at=str(src.get("expiresAt", "")),
+            blob_path=str(src.get("blobPath", "")),
+            raw=src if src else {"_raw": data},
+            status_code=status_code,
+        )
+
+
+@dataclass
+class FileUploadedResponse:
+    """Parsed response from POST /api/v1/documents/{ufid}/file-uploaded.
+
+    The server records the upload completion and enqueues the pipeline
+    event. The response shape isn't contract-locked, so we retain the
+    decoded body verbatim for the HTML report.
+    """
+
+    raw: dict[str, Any] = field(default_factory=dict)
+    status_code: int = 0
 
 
 @dataclass
@@ -109,15 +153,15 @@ def _walk_for_ufids(node: Any, out: list[str]) -> None:
             _walk_for_ufids(v, out)
 
 
-class GatewayDocumentServiceClient:
-    """Async HTTP client for Nebula document-service (via terzoai-gateway).
+class GatewayFileIngestionClient:
+    """Async HTTP client for Nebula file-ingestion service (via terzoai-gateway).
 
     base_url is the bare gateway host (no service prefix). The
-    `/nebula/document-service/api/v1` prefix is added here so callers
+    `/nebula/file-ingestion/api/v1` prefix is added here so callers
     can share one `E2E_BASE_URL` repo variable across clients.
     """
 
-    SERVICE_PREFIX = "/nebula/document-service/api/v1"
+    SERVICE_PREFIX = "/nebula/file-ingestion/api/v1"
 
     def __init__(self, base_url: str, tenant_id: int, access_token: str = "") -> None:
         self._base_url = base_url.rstrip("/")
@@ -138,10 +182,8 @@ class GatewayDocumentServiceClient:
         self,
         items: list[BulkUploadItem],
         source: str = "BULK_IMPORT",
-        truncated: bool = True,
-        total_items: int | None = None,
     ) -> BulkUploadResponse:
-        """POST {base_url}/nebula/document-service/api/v1/documents/bulk-upload.
+        """POST {base_url}/nebula/file-ingestion/api/v1/documents/bulk-upload.
 
         Server pulls each item from its `source_url` — no client-side upload
         step needed (unlike the singular presigned-upload flow). Downstream
@@ -150,8 +192,6 @@ class GatewayDocumentServiceClient:
         """
         payload = {
             "source": source,
-            "_truncated": truncated,
-            "_totalItems": total_items if total_items is not None else len(items),
             "items": [item.to_json() for item in items],
         }
         resp = await self._client.post(
@@ -192,3 +232,103 @@ class GatewayDocumentServiceClient:
             parsed.ufids,
         )
         return parsed
+
+    async def initiate_presigned_upload(
+        self,
+        name: str,
+        processing_mode: str = "EXTRACT",
+    ) -> PresignedUploadInitiation:
+        """POST {base_url}/nebula/file-ingestion/api/v1/documents/upload.
+
+        Server reserves a ufid and returns an Azure Blob SAS `uploadUrl`
+        the caller PUTs bytes to. This is step 1 of the presigned-upload
+        flow; follow with `put_to_upload_url` and `mark_file_uploaded`.
+        """
+        payload = {"name": name, "processingMode": processing_mode}
+        resp = await self._client.post(
+            f"{self.SERVICE_PREFIX}/documents/upload", json=payload
+        )
+        self._raise_for_status(resp, "initiate presigned upload")
+        parsed = PresignedUploadInitiation.from_json(
+            resp.json(), status_code=resp.status_code
+        )
+        logger.info(
+            "presigned-upload initiated: status=%s ufid=%s blobPath=%s expiresAt=%s",
+            parsed.status_code, parsed.ufid, parsed.blob_path, parsed.expires_at,
+        )
+        return parsed
+
+    async def put_to_upload_url(
+        self,
+        upload_url: str,
+        file_bytes: bytes,
+        content_type: str = "application/pdf",
+    ) -> int:
+        """PUT raw bytes directly to the presigned Azure Blob SAS URL.
+
+        Uses a one-shot client so the Bearer / X-Tenant-Id headers carried
+        by the gateway client do not leak into the Azure Blob request
+        (Azure rejects unknown headers on SAS PUTs).
+        """
+        async with httpx.AsyncClient(timeout=120.0) as raw_client:
+            resp = await raw_client.put(
+                upload_url,
+                content=file_bytes,
+                headers={
+                    "x-ms-blob-type": "BlockBlob",
+                    "Content-Type": content_type,
+                },
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"Azure Blob PUT failed: {resp.status_code} {resp.reason_phrase}\n"
+                    f"  url: {upload_url.split('?')[0]}\n"
+                    f"  response body: {resp.text[:2000] or '(empty)'}"
+                )
+            return resp.status_code
+
+    async def mark_file_uploaded(self, ufid: str, name: str) -> FileUploadedResponse:
+        """POST {base_url}/nebula/file-ingestion/api/v1/documents/{ufid}/file-uploaded.
+
+        Signals the server that bytes have landed in blob storage; this is
+        what enqueues the downstream pipeline (UPLOAD_QUEUED → ...). The
+        filename is re-sent here to match the gateway's expected payload.
+        """
+        resp = await self._client.post(
+            f"{self.SERVICE_PREFIX}/documents/{ufid}/file-uploaded",
+            json={"name": name},
+        )
+        self._raise_for_status(resp, f"mark file-uploaded for ufid={ufid}")
+        raw: dict[str, Any] = {}
+        if resp.text:
+            try:
+                decoded = resp.json()
+                raw = decoded if isinstance(decoded, dict) else {"_raw": decoded}
+            except ValueError:
+                raw = {"_raw": resp.text[:2000]}
+        return FileUploadedResponse(raw=raw, status_code=resp.status_code)
+
+    def _raise_for_status(self, resp: httpx.Response, op: str) -> None:
+        """Shared 4xx/5xx formatter: dump body + diagnostic headers + auth preview."""
+        if resp.status_code < 400:
+            return
+        debug_headers = {
+            k: v for k, v in resp.headers.items()
+            if k.lower() in {
+                "www-authenticate", "x-error", "x-request-id",
+                "x-amzn-requestid", "x-trace-id", "content-type",
+            }
+        }
+        body_snippet = resp.text[:2000] if resp.text else "(empty body)"
+        auth_sent = self._client.headers.get("Authorization", "(none)")
+        auth_preview = (
+            auth_sent[:12] + "..." + auth_sent[-6:]
+            if len(auth_sent) > 24 else "(short/none)"
+        )
+        raise RuntimeError(
+            f"{op} failed: {resp.status_code} {resp.reason_phrase}\n"
+            f"  url: {resp.request.url}\n"
+            f"  sent Authorization header: {auth_preview}\n"
+            f"  response headers: {debug_headers}\n"
+            f"  response body: {body_snippet}"
+        )

@@ -43,21 +43,31 @@ Services communicate asynchronously via **Azure Event Hub** (5 child hubs under 
 
 ## What This Repo Tests
 
-Two end-to-end paths, selectable by **pytest marker**:
+Three end-to-end paths, selectable by **pytest marker**. Every test regenerates its own byte-unique Contract Agreement PDF so content-addressed dedup never short-circuits a run.
 
 ### 1. Bulk-upload + full pipeline event verification (`-m bulk_upload`)
 
 `tests/api/test_bulk_upload.py::test_bulk_upload_full_pipeline` — hits the Nebula gateway:
 
-- Generate a fresh 1-page **Contract Agreement PDF** per run (run_id embedded in content → unique bytes, no dedup short-circuits)
-- Upload it to Azure Blob as `e2e-test-fixtures/nebulae2etest-<run_id>.pdf`, mint a 2h read-only blob-scope SAS URL, delete the blob at session teardown
-- POST to `/nebula/document-service/api/v1/documents/bulk-upload` with that SAS URL as the item's `sourceUrl`
+- Generate a fresh 1-page **Contract Agreement PDF** per test (run_id + test-node name embedded in content → unique bytes, no dedup short-circuits)
+- Upload it to Azure Blob as `e2e-test-fixtures/nebulae2etest-<run_id>-<test>.pdf`, mint a 2h read-only blob-scope SAS URL, delete the blob at teardown
+- POST to `/nebula/file-ingestion/api/v1/documents/bulk-upload` with that SAS URL as the item's `sourceUrl`
 - Extract the `ufid` from the response
 - Listen to **all 5 child Event Hubs in parallel** for pipeline events tracked by `data.action` (`UPLOAD_QUEUED → UPLOAD → OCR_QUEUED → EXTRACTION_QUEUED → EXTRACTION_COMPLETED`)
 - Record each action as a **PASS / FAIL row** in the HTML pipeline report
 - If `action=FAILED` fires, mark remaining steps FAIL and surface the `failure_reason` payload field
 
-### 2. UI file upload (`-m ui_upload`)
+### 2. Presigned-URL direct upload (`-m presigned_upload`)
+
+`tests/api/test_presigned_upload.py::test_presigned_upload_full_pipeline` — three-step gateway flow, same Event Hub verification:
+
+- **Step 1**: `POST /nebula/file-ingestion/api/v1/documents/upload` with `{ name, processingMode: "EXTRACT" }` → server returns `{ ufid, uploadUrl, expiresAt, blobPath }`
+- **Step 2**: `PUT {uploadUrl}` with raw PDF bytes (headers: `x-ms-blob-type: BlockBlob`, `Content-Type: application/pdf`)
+- **Step 3**: `POST /nebula/file-ingestion/api/v1/documents/{ufid}/file-uploaded` with `{ name }` → enqueues `UPLOAD_QUEUED`
+- Each HTTP call lands as its own row in the HTML report (initiate / PUT / file-uploaded) so a failure at any step is pinpointed without reading server logs
+- After step 3 the same pipeline stages as bulk-upload are verified via Event Hub
+
+### 3. UI file upload (`-m ui_upload`)
 
 `tests/api/test_ui_file_upload.py::test_ui_file_upload_full_pipeline` — hits the Analytics/mafia host directly, as a browser would:
 
@@ -67,16 +77,9 @@ Two end-to-end paths, selectable by **pytest marker**:
 - Capture the response body verbatim into the HTML report
 - When the response carries a `ufid`, watch the same pipeline stages bulk-upload does; otherwise record them SKIPPED
 
-### 3. Presigned SAS upload + pipeline progression (legacy)
+### 4. Legacy presigned-upload tests (disabled)
 
-`tests/api/test_single_presigned_upload.py` and `test_multi_presigned_upload.py`:
-
-- 3-step flow (initiate → upload to Azure Blob → confirm)
-- Polls `processingState` through `CONFIRMED → OCR_QUEUED → OCR_COMPLETED → EXTRACTION_QUEUED`
-- Multi-file variants run with 3, 5, and 10 files concurrently
-- Smoke test (`test_smoke.py`) — connectivity, auth, basic CRUD
-
-Legacy tests are module-level `pytest.mark.skip`-ed today; only markers `-m e2e`, `-m bulk_upload`, `-m ui_upload` select the active suite.
+`tests/api/test_single_presigned_upload.py` and `test_multi_presigned_upload.py` target the pre-gateway mafia endpoint and are module-level `pytest.mark.skip`-ed. Only markers `-m e2e`, `-m bulk_upload`, `-m presigned_upload`, `-m ui_upload` select the active suite.
 
 ### Pytest markers — running a subset
 
@@ -84,18 +87,20 @@ Every active test carries the `e2e` parent marker plus a per-endpoint marker.
 
 | Marker | Tests selected |
 |---|---|
-| `e2e` | Both `bulk_upload` + `ui_upload` (nightly default) |
+| `e2e` | All active tests: `bulk_upload` + `presigned_upload` + `ui_upload` (nightly default) |
 | `bulk_upload` | `tests/api/test_bulk_upload.py` |
+| `presigned_upload` | `tests/api/test_presigned_upload.py` |
 | `ui_upload` | `tests/api/test_ui_file_upload.py` |
 
 Local:
 ```bash
-uv run pytest tests/api/ -v -m e2e          # both
-uv run pytest tests/api/ -v -m bulk_upload  # bulk only
-uv run pytest tests/api/ -v -m ui_upload    # UI only
+uv run pytest tests/api/ -v -m e2e                 # all three
+uv run pytest tests/api/ -v -m bulk_upload         # bulk only
+uv run pytest tests/api/ -v -m presigned_upload    # presigned only
+uv run pytest tests/api/ -v -m ui_upload           # UI only
 ```
 
-GitHub Actions (`workflow_dispatch` dropdown on **E2E Nightly**) exposes the same three values; scheduled runs always use `-m e2e`.
+GitHub Actions (`workflow_dispatch` dropdown on **E2E Nightly**) exposes the same four values; scheduled runs always use `-m e2e`.
 
 ---
 
@@ -106,7 +111,7 @@ GitHub Actions (`workflow_dispatch` dropdown on **E2E Nightly**) exposes the sam
 ```
   nebula-e2e-tests
        │
-       │  POST /nebula/document-service/api/v1/documents/bulk-upload
+       │  POST /nebula/file-ingestion/api/v1/documents/bulk-upload
        │       Authorization: Bearer <token>
        │       X-Tenant-Id: 1000012
        │       { source: BULK_IMPORT, items: [{ name, sourceUrl, ... }] }
@@ -179,7 +184,7 @@ The PDF bytes are uploaded from the test process to **Azure Blob Storage** via t
 
 **Yes, tests create real documents on the Dev environment.** Each test run:
 
-- Creates documents in the document-service database (tenant `1000012`)
+- Creates documents in the file-ingestion database (tenant `1000012`)
 - Uploads files to Azure Blob Storage under `1000012/raw/{ufid}/`
 - Triggers real OCR processing via Azure Document Intelligence (OCR Service)
 - Triggers real extraction (Extraction Service) and ingestion (Ingestion Service)
@@ -205,7 +210,7 @@ Test Process                    mafia.terzocloud.com                Azure Blob S
     ├─── POST /{ufid}/confirm ────────► │                                │
     │◄── 201 {status: CONFIRMED} ──────┤                                │
     │                                   │                                │
-    │    [outbox poller → Event Hub → document-service consumes]         │
+    │    [outbox poller → Event Hub → file-ingestion consumes]           │
     │                                   │                                │
     ├─── GET /{ufid} (poll) ──────────► │                                │
     │◄── {processingState: OCR_QUEUED} ┤                                │
@@ -326,16 +331,18 @@ nebula-e2e-tests/
 │   ├── report.py                      # PipelineReport — generates HTML pipeline report
 │   ├── run_context.py                 # unique run-id tagging for traceability
 │   └── api_clients/
-│       ├── document_service.py        # mafia/legacy client (singular upload + presigned SAS)
-│       └── gateway_document_service.py  # Nebula gateway client (bulk-upload + Bearer auth)
+│       ├── file_ingestion.py          # mafia/legacy client (singular upload + presigned SAS)
+│       └── gateway_file_ingestion.py  # Nebula gateway client (bulk-upload + Bearer auth)
 │
 └── tests/
     ├── api/
-    │   ├── test_smoke.py                       # connectivity, auth, basic CRUD
-    │   ├── test_single_presigned_upload.py     # 1 file → presigned-upload pipeline
-    │   ├── test_multi_presigned_upload.py      # N files concurrent → presigned pipeline
+    │   ├── test_smoke.py                       # connectivity, auth, basic CRUD (legacy, skipped)
+    │   ├── test_single_presigned_upload.py     # 1 file → mafia presigned pipeline (legacy, skipped)
+    │   ├── test_multi_presigned_upload.py      # N files concurrent → mafia presigned (legacy, skipped)
     │   ├── test_bulk_upload.py                 # bulk-upload + action-based Event Hub verification
-    │   └── test_event_hub_dry_run.py          # diagnostic: connect to Event Hub, print events
+    │   ├── test_presigned_upload.py            # gateway presigned upload (initiate → PUT → file-uploaded) + Event Hub
+    │   ├── test_ui_file_upload.py              # UI contract-drive upload + Event Hub verification
+    │   └── test_event_hub_dry_run.py           # diagnostic: connect to Event Hub, print events
     └── ui/                            # Playwright tests (future)
 ```
 
@@ -400,6 +407,24 @@ Each step becomes a row in `reports/pipeline-<run-id>.html` with PASS / FAIL / S
 **Failure action.** If `action=FAILED` fires for the ufid at any point, remaining steps are recorded FAIL with the `failure_reason` payload field and the test fails.
 
 **Event Hub not configured.** If `E2E_EVENT_HUB_CONNECTION_STRING` is unset, steps 02-05 are recorded SKIPPED and the test calls `pytest.skip()` so the daily run doesn't fail on missing infra.
+
+### Presigned-URL Direct Upload + Event-Hub Verification (`test_presigned_upload.py`)
+
+Three-step gateway flow: the client asks the server for a SAS URL, PUTs the bytes to Azure Blob, then confirms with the server. Each step is its own report row — a failure at initiate, PUT, or file-uploaded is surfaced directly instead of showing up as a generic "pipeline didn't start" mystery.
+
+| Step | Service | Call / Action | Per-stage timeout |
+|------|---------|--------------|-------------------|
+| 01 | **File Ingestion** | `POST /api/v1/documents/upload` → `{ ufid, uploadUrl, expiresAt, blobPath }` | — |
+| 02 | **Azure Blob** | `PUT {uploadUrl}` with raw PDF bytes (`x-ms-blob-type: BlockBlob`) | — |
+| 03 | **File Ingestion** | `POST /api/v1/documents/{ufid}/file-uploaded` → enqueues pipeline | — |
+| 04 | **Event Hub** | First event captured for the ufid (proves listener wiring) | 600s |
+| 05 | **Upload Service** | `UPLOAD_QUEUED` | 600s |
+| 06 | **Upload Service** | `UPLOAD` | 600s |
+| 07 | **OCR Service** | `OCR_QUEUED` | 600s |
+| 08 | **Extraction Service** | `EXTRACTION_QUEUED` | 600s |
+| 09 | **Extraction Service** | `EXTRACTION_COMPLETED` | 600s |
+
+If step 2 (blob PUT) or step 3 (file-uploaded confirm) fails, the Event Hub stages are recorded SKIPPED with a clear "pipeline never triggered" reason — the report still shows the intended shape. Force-kill + per-stage timeout semantics are identical to bulk-upload (shared `PIPELINE_STAGES` loop).
 
 ---
 
@@ -499,7 +524,7 @@ All configuration is via environment variables (prefix `E2E_`) or a `.env` file.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `E2E_BASE_URL` | `https://mafia.terzocloud.com` | API base URL. In CI: `https://terzoai-gateway-dev.terzocloud.com` (gateway). The bulk-upload client appends its own `/nebula/document-service/api/v1` prefix. |
+| `E2E_BASE_URL` | `https://mafia.terzocloud.com` | API base URL. In CI: `https://terzoai-gateway-dev.terzocloud.com` (gateway). The bulk-upload client appends its own `/nebula/file-ingestion/api/v1` prefix. |
 | `E2E_TENANT_ID` | `1000012` | Tenant for Dev environment |
 
 ### Bulk-upload payload (per-run Azure Blob SAS)
@@ -695,7 +720,7 @@ When `E2E_TOKEN` is empty, the test mints a fresh bearer per session:
                                    ▼
                   Authorization: Bearer <token>
                   X-Tenant-Id: 1000012
-                  → POST /nebula/document-service/api/v1/documents/bulk-upload
+                  → POST /nebula/file-ingestion/api/v1/documents/bulk-upload
 ```
 
 Step 1 works from any network. Step 2's host is internal to the Dev cluster, so the auto-fetch flow is **only fully working from inside the Dev cluster** (K8s Job, self-hosted runner, etc.). From GitHub-hosted runners, set `E2E_TOKEN` instead.
@@ -718,7 +743,7 @@ async def poll_until(check_fn, predicate, timeout, interval=2.0, backoff=1.5, ma
 |-----------------|-----------------|-------------------|--------------|
 | CONFIRMED → OCR_QUEUED | Outbox poller (500ms cycle) | < 2s | 15s |
 | OCR_QUEUED → OCR_COMPLETED | Azure Document Intelligence via ocr-service | 10–120s | 300s |
-| OCR_COMPLETED → EXTRACTION_QUEUED | document-service event consumer | < 2s | 15s |
+| OCR_COMPLETED → EXTRACTION_QUEUED | file-ingestion event consumer | < 2s | 15s |
 | EXTRACTION_QUEUED → EXTRACTION_COMPLETED | Extraction Service worker | 10–60s | 180s |
 | **Full pipeline** | All stages | 30–180s | **600s** |
 
@@ -863,7 +888,7 @@ Receive tasks are started lazily on the first `watch()` call (not during fixture
 | `401 Unauthorized` | Access token missing, expired, or invalid | In-cluster: auto-fetch handles this. Check auth service is up |
 | `403 Forbidden` | Token lacks permissions for tenant | Verify `E2E_AUTH_USER_ID` has access to tenant `1000012` |
 | `PollTimeoutError: OCR_COMPLETED` | OCR service slow or down | Check ocr-service pods. Azure DI may be throttling |
-| `PollTimeoutError: EXTRACTION_QUEUED` | document-service didn't route event | Check Event Hub consumer lag, outbox_events table |
+| `PollTimeoutError: EXTRACTION_QUEUED` | file-ingestion didn't route event | Check Event Hub consumer lag, outbox_events table |
 | `No OCR_PDF artifact` | OCR completed but artifact not recorded | Check document_artifact table for the ufid |
 | `ConnectError on SAS URL PUT` | Azure Blob unreachable | Check network/firewall from test runner to Azure |
 
@@ -894,7 +919,7 @@ Receive tasks are started lazily on the first `watch()` call (not during fixture
 
 ### Done in this iteration
 
-- ✅ Bulk-upload via Nebula gateway (`POST /nebula/document-service/api/v1/documents/bulk-upload`)
+- ✅ Bulk-upload via Nebula gateway (`POST /nebula/file-ingestion/api/v1/documents/bulk-upload`)
 - ✅ UI file upload (`POST /_/api/contract-drive/{drive_id}/add`) with `action=overwrite` for idempotent re-runs
 - ✅ Per-run Contract Agreement PDF generation (reportlab, ~4 KB, run_id-unique bytes)
 - ✅ Per-run Azure Blob upload + SAS mint + teardown cleanup for bulk-upload `sourceUrl`

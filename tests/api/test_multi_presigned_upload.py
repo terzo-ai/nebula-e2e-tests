@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from lib.api_clients.document_service import DocumentServiceClient
+from lib.api_clients.file_ingestion import FileIngestionClient
 from lib.config import E2EConfig
 from lib.fixtures import FixtureFile
 from lib.polling import PollTimeoutError, poll_until
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 
 async def _upload_single_file(
-    doc_client: DocumentServiceClient,
+    doc_client: FileIngestionClient,
     filename: str,
     file_bytes: bytes,
     content_type: str = "application/pdf",
@@ -48,7 +48,7 @@ async def _upload_single_file(
 
 @pytest.mark.parametrize("file_count", [3, 5, 10])
 async def test_multi_presigned_upload_all_reach_extraction_queued(
-    doc_client: DocumentServiceClient,
+    doc_client: FileIngestionClient,
     config: E2EConfig,
     test_files: list[FixtureFile],
     run_ctx: RunContext,

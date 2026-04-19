@@ -30,6 +30,7 @@ markers = [
     # Per-endpoint tags for targeting a single test case from CI.
     "bulk_upload: bulk-upload gateway endpoint pipeline test",
     "ui_upload: UI contract-drive file upload endpoint pipeline test",
+    "presigned_upload: presigned-URL direct upload (initiate → PUT → file-uploaded) pipeline test",
 ]
 
 # Live log capture — surfaces logger.info/exception from lib.event_hub

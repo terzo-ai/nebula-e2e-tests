@@ -11,7 +11,7 @@ class E2EConfig(BaseSettings):
 
     # Base URL for all API traffic. In CI this is set to the gateway URL
     # (including service prefix) via the E2E_BASE_URL repo variable, e.g.
-    # https://terzoai-gateway-dev.terzocloud.com/nebula/document-service
+    # https://terzoai-gateway-dev.terzocloud.com/nebula/file-ingestion
     # The default here keeps local dev backwards-compat with mafia.
     base_url: str = "https://mafia.terzocloud.com"
     tenant_id: int = 1000012

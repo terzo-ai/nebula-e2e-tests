@@ -13,9 +13,10 @@ on:
         description: "pytest -m tag to select which tests run"
         type: choice
         options:
-          - bulk_upload    # just the gateway bulk-upload pipeline test
-          - e2e            # all E2E tests (bulk_upload + ui_upload)
-          - ui_upload      # just the UI contract-drive upload test
+          - bulk_upload       # just the gateway bulk-upload pipeline test
+          - e2e               # all E2E tests (bulk_upload + ui_upload + presigned_upload)
+          - presigned_upload  # just the presigned-URL direct upload pipeline test
+          - ui_upload         # just the UI contract-drive upload test
         default: bulk_upload
 
 jobs:
@@ -24,7 +25,8 @@ jobs:
     environment: dev
     env:
       # Scheduled runs always hit the full `e2e` suite; workflow_dispatch
-      # can narrow to `bulk_upload` or `ui_upload` via the dropdown above.
+      # can narrow to `bulk_upload`, `presigned_upload`, or `ui_upload`
+      # via the dropdown above.
       TEST_MARKER: ${{ inputs.test_marker || 'e2e' }}
     steps:
       - uses: actions/checkout@v4

@@ -31,9 +31,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from lib.api_clients.gateway_document_service import (
+from lib.api_clients.gateway_file_ingestion import (
     BulkUploadItem,
-    GatewayDocumentServiceClient,
+    GatewayFileIngestionClient,
 )
 from lib.config import E2EConfig
 from lib.report import PipelineReport, StepStatus
@@ -118,7 +118,7 @@ PIPELINE_STAGES: list[PipelineStage] = [
 
 
 async def test_bulk_upload_full_pipeline(
-    gateway_doc_client: GatewayDocumentServiceClient,
+    gateway_doc_client: GatewayFileIngestionClient,
     config: E2EConfig,
     run_ctx: RunContext,
     event_listener: "EventHubListener | None",
@@ -141,15 +141,14 @@ async def test_bulk_upload_full_pipeline(
         items=[
             BulkUploadItem(
                 name=filename,
+                processing_mode="EXTRACT",
                 content_type="application/pdf",
                 size_bytes=len(generated_contract_pdf),
-                document_type="GENERAL",
+                document_type="contract",
                 source_url=bulk_upload_source_url,
             ),
         ],
         source="BULK_IMPORT",
-        truncated=True,
-        total_items=1000,
     )
 
     assert response.ufids, (

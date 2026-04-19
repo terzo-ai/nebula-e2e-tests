@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 import pytest
 
 from lib.api_clients.contract_drive import ContractDriveClient
-from lib.api_clients.document_service import DocumentServiceClient
-from lib.api_clients.gateway_document_service import GatewayDocumentServiceClient
+from lib.api_clients.file_ingestion import FileIngestionClient
+from lib.api_clients.gateway_file_ingestion import GatewayFileIngestionClient
 from lib.auth import (
     AuthError,
     fetch_access_token,
@@ -77,26 +77,41 @@ def sample_pdf(test_files: list[FixtureFile]) -> bytes:
     return test_files[0].content
 
 
-@pytest.fixture(scope="session")
-def generated_contract_pdf(run_ctx: RunContext) -> bytes:
-    """Fresh 1-page Contract Agreement PDF bytes, unique to this run_id.
+@pytest.fixture
+def generated_contract_pdf(
+    run_ctx: RunContext, request: pytest.FixtureRequest
+) -> bytes:
+    """Fresh 1-page Contract Agreement PDF bytes, regenerated per test.
 
-    Keeps scheduled runs from hitting content-dedup in the pipeline. ~30–60 KB.
+    Each test invocation gets a byte-unique PDF (the document reference
+    embeds `run_id` + test-node name + a short random suffix) so repeat
+    tests inside one session never collide with content-addressed dedup
+    on the server. ~30–60 KB.
     """
-    pdf = generate_contract_pdf(run_ctx.run_id)
-    print(f"\n  Generated contract PDF: {len(pdf)} bytes for run {run_ctx.run_id}")
+    import uuid
+    doc_ref = f"{run_ctx.run_id}-{request.node.name}-{uuid.uuid4().hex[:4]}"
+    pdf = generate_contract_pdf(doc_ref)
+    print(
+        f"\n  Generated contract PDF: {len(pdf)} bytes "
+        f"(test={request.node.name}, ref={doc_ref})"
+    )
     return pdf
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def bulk_upload_source_url(
     config: E2EConfig,
     run_ctx: RunContext,
     generated_contract_pdf: bytes,
     pipeline_report: PipelineReport,
+    request: pytest.FixtureRequest,
 ):
-    """Upload the per-run PDF to Azure Blob and return a SAS URL that
+    """Upload the per-test PDF to Azure Blob and return a SAS URL that
     bulk-upload's worker can fetch. Cleans up the blob at teardown.
+
+    Function-scoped to match `generated_contract_pdf` — each test gets
+    its own freshly uploaded blob (distinct blob name = run_id + test
+    name) so runs never reuse a stale body or collide on the container.
 
     Falls back to `config.bulk_upload_source_url` (the static pre-staged
     URL) when the fixtures connection string isn't configured — keeps
@@ -105,23 +120,24 @@ def bulk_upload_source_url(
     if not config.fixtures_connection_string:
         msg = (
             "E2E_FIXTURES_CONNECTION_STRING unset — using pre-staged URL "
-            f"{config.bulk_upload_source_url} (no per-run upload, no cleanup)."
+            f"{config.bulk_upload_source_url} (no per-test upload, no cleanup)."
         )
         print(f"\n  {msg}")
         yield config.bulk_upload_source_url
         return
 
+    upload_tag = f"{run_ctx.run_id}-{request.node.name}"
     try:
         upload: SourceUpload = upload_contract_pdf(
             content=generated_contract_pdf,
-            run_id=run_ctx.run_id,
+            run_id=upload_tag,
             connection_string=config.fixtures_connection_string,
             container=config.upload_container,
         )
     except SourceUploadError as e:
         # Record + re-raise so the session fails fast rather than running
         # bulk-upload against a stale URL and hiding the real cause.
-        pipeline_report.record_error(f"Per-run source upload failed: {e}")
+        pipeline_report.record_error(f"Per-test source upload failed: {e}")
         raise
 
     print(
@@ -221,8 +237,8 @@ def pipeline_report(config: E2EConfig, run_ctx: RunContext):
 
 
 @pytest.fixture
-async def doc_client(config: E2EConfig, access_token: str) -> DocumentServiceClient:
-    client = DocumentServiceClient(
+async def doc_client(config: E2EConfig, access_token: str) -> FileIngestionClient:
+    client = FileIngestionClient(
         base_url=config.base_url,
         tenant_id=config.tenant_id,
         access_token=access_token,
@@ -234,9 +250,9 @@ async def doc_client(config: E2EConfig, access_token: str) -> DocumentServiceCli
 @pytest.fixture
 async def gateway_doc_client(
     config: E2EConfig, access_token: str
-) -> GatewayDocumentServiceClient:
-    """Client targeting document-service via the terzoai-gateway (for bulk-upload etc.)."""
-    client = GatewayDocumentServiceClient(
+) -> GatewayFileIngestionClient:
+    """Client targeting file-ingestion via the terzoai-gateway (for bulk-upload etc.)."""
+    client = GatewayFileIngestionClient(
         base_url=config.base_url,
         tenant_id=config.tenant_id,
         access_token=access_token,

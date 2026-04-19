@@ -69,8 +69,8 @@ class DocumentArtifactsResponse:
         )
 
 
-class DocumentServiceClient:
-    """Typed async HTTP client for the document-service API on mafia.terzocloud.com."""
+class FileIngestionClient:
+    """Typed async HTTP client for the file-ingestion API on mafia.terzocloud.com."""
 
     def __init__(self, base_url: str, tenant_id: int, access_token: str = "") -> None:
         self._base_url = base_url.rstrip("/")

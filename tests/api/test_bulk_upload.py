@@ -93,7 +93,7 @@ PIPELINE_STAGES: list[PipelineStage] = [
     PipelineStage(
         service="Document Service",
         description="Upload completed",
-        action="UPLOAD",
+        action="UPLOADED",
         timeout_s=STAGE_TIMEOUT_S,
     ),
     PipelineStage(

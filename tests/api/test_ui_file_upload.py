@@ -69,7 +69,10 @@ async def test_ui_file_upload_full_pipeline(
     bulk-upload test, so scheduled runs never collide with a cached
     body on the server side.
     """
-    filename = f"nebulae2etest-{run_ctx.run_id}.pdf"
+    # Unique suffix so doc-reader's filename filter resolves the ufid for
+    # this run's UI upload and not the bulk-upload test's identically-
+    # run-tagged document.
+    filename = f"nebulae2etest-{run_ctx.run_id}-ui.pdf"
 
     # ------------------------------------------------------------------
     # Stage 1 — UI endpoint: PASS when we get HTTP 200.

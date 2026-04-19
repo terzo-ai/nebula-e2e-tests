@@ -40,7 +40,6 @@ class E2EConfig(BaseSettings):
     analytics_email: str = ""       # via E2E_ANALYTICS_EMAIL secret
     analytics_password: str = ""    # via E2E_ANALYTICS_PASSWORD secret
     analytics_xsrf_token: str = ""  # via E2E_ANALYTICS_XSRF_TOKEN secret
-    analytics_cookie: str = ""      # via E2E_ANALYTICS_COOKIE secret
 
     # Step 2 — auth-service token exchange. HTTP only (HTTPS on this host
     # returns 405 for POST /auth/token). K8s init container uses the same

@@ -243,8 +243,12 @@ class EventHubListener:
                     payload=payload,
                 )
                 self._events.append(captured)
+                # Latch-style signal: producer only sets. The consumer
+                # clears before each ``wait()`` (with a fresh events-list
+                # re-check afterwards), so a rapid burst of set() calls
+                # can't be lost between check and wait the way an
+                # immediate set-then-clear could lose them.
                 self._new_event.set()
-                self._new_event.clear()
                 print(
                     f"  [EventHub] id={event_id} action={action} "
                     f"document_id={doc_id} partition={partition_context.partition_id}"
@@ -429,6 +433,10 @@ class EventHubListener:
                 )
                 last_heartbeat = now
 
+            # Clear before suspending so a set() racing between the
+            # events-list check above and the wait() below still wakes
+            # us — the loop re-enters and re-scans ``self._events``.
+            self._new_event.clear()
             try:
                 await asyncio.wait_for(self._new_event.wait(), timeout=min(remaining, 2.0))
             except asyncio.TimeoutError:

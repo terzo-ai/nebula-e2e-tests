@@ -563,7 +563,6 @@ Each run's blob lands at `{container}/nebulae2etest-<run_id>.pdf` and is removed
 | `E2E_ANALYTICS_EMAIL` | — | Login email |
 | `E2E_ANALYTICS_PASSWORD` | — | Login password (secret) |
 | `E2E_ANALYTICS_XSRF_TOKEN` | — | `X-XSRF-TOKEN` value. Used as both the header and the derived `XSRF-TOKEN=<...>` cookie. (secret) |
-| `E2E_ANALYTICS_COOKIE` | — | **Deprecated.** Legacy pre-computed `Cookie` header. The new flow derives the cookie from `XSRF_TOKEN` and mints the `x-access-token` session cookie via the login call itself, so this env var is no longer needed for any active code path. |
 
 **Step 2 — auth-service token exchange** (Dev cluster only)
 
@@ -794,9 +793,9 @@ Secrets:
 | `E2E_EVENT_HUB_CONNECTION_STRING` | Namespace-scoped SAS string |
 | `E2E_SLACK_BOT_TOKEN` | Slack Bot token — scopes: `chat:write`, `files:write`, `users:read.email` |
 
-> **Retired from CI:** `E2E_BULK_UPLOAD_SOURCE_URL` and `E2E_BULK_UPLOAD_FILE_NAME` — per-run PDF generation + Azure Blob SAS upload makes them redundant. The filename is now derived as `nebulae2etest-<run_id>.pdf`. The source-URL env var survives only as a local-dev fallback default in `lib/config.py`; it's not read in CI.
+> **Retired from CI:** `E2E_BULK_UPLOAD_SOURCE_URL` and `E2E_BULK_UPLOAD_FILE_NAME` — per-run PDF generation + Azure Blob SAS upload makes them redundant. Filenames are now derived as `nebulae2etest-<run_id>-<test>.pdf` (suffixed so doc-reader's name-based ufid lookup never confuses one test's upload with another's). The source-URL env var survives only as a local-dev fallback default in `lib/config.py`; it's not read in CI.
 >
-> `E2E_ANALYTICS_COOKIE` is no longer required for the UI upload path (cookie is derived from the XSRF token + minted fresh per run via Analytics login). The existing `lib/auth.py::fetch_analytics_access_token` still reads it, but that legacy function is no longer on the critical path — `fetch_access_token` now uses the cookie-based `fetch_analytics_session_cookie` flow.
+> **Retired:** `E2E_ANALYTICS_COOKIE` and `lib.auth.fetch_analytics_access_token`. The live path derives the cookie from `E2E_ANALYTICS_XSRF_TOKEN` and mints the `x-access-token` session cookie via the Analytics login call itself (`fetch_analytics_session_cookie`), so both the env var and the legacy helper were dead.
 
 ### K8s CronJob (primary scheduler for in-cluster runs)
 

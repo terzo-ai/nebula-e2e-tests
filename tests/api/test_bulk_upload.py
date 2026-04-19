@@ -52,7 +52,10 @@ async def test_bulk_upload_full_pipeline(
     generated Contract Agreement PDF to Azure Blob and returns a 2h SAS
     URL — so scheduled runs never collide with a stale / cached object.
     """
-    filename = f"nebulae2etest-{run_ctx.run_id}.pdf"
+    # Suffix the filename so doc-reader (which filters by exact name) can
+    # never confuse this document with the identically-run-tagged one the
+    # UI upload test registers in the same session.
+    filename = f"nebulae2etest-{run_ctx.run_id}-bulk.pdf"
 
     # ------------------------------------------------------------------
     # Stage 1 — File Ingestion Service: PASS when we get HTTP 202 + ufid.

@@ -68,13 +68,21 @@ class DocumentTrace:
     response_body: dict[str, Any] | None = None
 
     def compute_status(self) -> None:
+        # Rollup rules, in priority order:
+        #   * any FAIL  → FAIL
+        #   * any PARTIAL/PENDING/SKIPPED → PARTIAL ("unverified")
+        #   * else → PASS
+        #
+        # SKIPPED used to roll up to PASS, which masked cases where the
+        # pipeline stages couldn't be verified (e.g. Event Hub not wired).
+        # Treating SKIPPED as non-pass mirrors Slack's "unverified" state.
         if not self.steps:
             self.overall_status = StepStatus.PENDING
             return
         statuses = {s.status for s in self.steps}
         if StepStatus.FAIL in statuses:
             self.overall_status = StepStatus.FAIL
-        elif StepStatus.PARTIAL in statuses or StepStatus.PENDING in statuses:
+        elif statuses - {StepStatus.PASS}:
             self.overall_status = StepStatus.PARTIAL
         else:
             self.overall_status = StepStatus.PASS

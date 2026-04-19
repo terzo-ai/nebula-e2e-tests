@@ -16,7 +16,9 @@ from inside the Dev cluster. So step 2 will fail from GitHub-hosted runners
 
 from __future__ import annotations
 
+import base64
 import json
+import time
 from typing import Any
 
 import httpx
@@ -26,6 +28,35 @@ from lib.config import E2EConfig
 
 class AuthError(RuntimeError):
     """Raised when either step of the auth flow fails."""
+
+
+def is_token_expired(token: str, leeway_seconds: int = 60) -> bool:
+    """Return True if `token` is a JWT whose `exp` claim is in the past.
+
+    Tokens that don't parse as a JWT (no `exp`, wrong shape, bad base64, or
+    non-JSON payload) are treated as *not expired* so a manually-minted
+    opaque token isn't preemptively thrown away. Callers still see 401s
+    from the gateway if such a token really is bad.
+
+    `leeway_seconds` refreshes slightly-early so a token that expires
+    mid-test doesn't cause a late-stage failure.
+    """
+    if not token:
+        return True
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    payload_segment = parts[1]
+    padding = "=" * (-len(payload_segment) % 4)
+    try:
+        payload_bytes = base64.urlsafe_b64decode(payload_segment + padding)
+        payload = json.loads(payload_bytes)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    exp = payload.get("exp") if isinstance(payload, dict) else None
+    if not isinstance(exp, (int, float)):
+        return False
+    return time.time() + leeway_seconds >= exp
 
 
 async def fetch_analytics_access_token(config: E2EConfig) -> str:

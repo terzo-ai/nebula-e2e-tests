@@ -575,10 +575,9 @@ def _logs_html(report: PipelineReport) -> str:
 # whose `service` matches any of the listed names. Stages after File Ingestion
 # Service are driven entirely by Event Hub events captured during the run.
 _FLOW_STAGES: list[tuple[str, tuple[str, ...]]] = [
-    ("File Ingestion Service", ("File Ingestion Service", "UI / Drive")),
-    ("Event Hub",              ("Event Hub",)),
-    ("OCR",                    ("OCR Service",)),
-    ("Extraction",             ("Extraction Service",)),
+    ("File Ingestion", ("File Ingestion Service", "UI / Drive")),
+    ("OCR",            ("OCR Service",)),
+    ("Auto Extraction", ("Auto Extraction Service", "Extraction Service")),
 ]
 
 _FLOW_ICONS: dict[StepStatus, str] = {
@@ -615,10 +614,8 @@ def _stage_substatus(
         return "skipped"
     if status in (StepStatus.PARTIAL, StepStatus.PENDING):
         return "partial"
-    if stage_name == "File Ingestion Service":
+    if stage_name == "File Ingestion":
         return "uploaded"
-    if stage_name == "Event Hub":
-        return "no failures"
     return "completed"
 
 
@@ -790,11 +787,13 @@ def _event_timeline_html(events: list[Any]) -> str:
     for ev in events:
         short_doc_id = str(ev.document_id)[:8] if ev.document_id else "-"
         short_event_id = str(ev.event_id)[:12] if ev.event_id else "-"
+        event_type = getattr(ev, "event_type", "") or "-"
         payload_html = _payload_json_html(ev.payload)
         event_rows += f"""
             <tr>
               <td><code>{_esc(str(ev.received_at))}</code></td>
-              <td><code>{_esc(str(ev.action))}</code></td>
+              <td><code>{_esc(str(event_type))}</code></td>
+              <td><code>{_esc(str(ev.action) or "-")}</code></td>
               <td><code title="{_esc(str(ev.event_id))}">{_esc(short_event_id)}</code></td>
               <td><code title="{_esc(str(ev.document_id))}">{_esc(short_doc_id)}</code></td>
               <td>{_esc(str(ev.partition_id))}</td>
@@ -813,7 +812,7 @@ def _event_timeline_html(events: list[Any]) -> str:
           </h4>
           <table class="events-table">
             <thead><tr>
-              <th>Received At</th><th>Action</th><th>Event ID</th>
+              <th>Received At</th><th>Type</th><th>Action</th><th>Event ID</th>
               <th>Doc ID</th><th>Partition</th><th>Seq #</th><th>Payload</th>
             </tr></thead>
             <tbody>{event_rows}</tbody>

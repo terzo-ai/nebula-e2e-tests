@@ -252,23 +252,19 @@ def pipeline_report(config: E2EConfig, run_ctx: RunContext):
 
         # Always-on DM summary for paventhan@terzocloud.com. The workflow
         # step that sends this is NOT gated by E2E_SLACK_NOTIFY — so
-        # paventhan gets a run_id + link on every scheduled run, even
-        # when channel notifications are disabled. Text-only payload;
-        # the workflow resolves the email to a user_id via
-        # users.lookupByEmail and fills in `channel` before posting.
-        dm_text = (
-            f":test_tube: *E2E run* `{run_ctx.run_id}` — "
-            f"{report.overall_status.value}"
-        )
-        if gh_url:
-            dm_text += f" · <{gh_url}|GitHub Actions run>"
-        dm_text += f"\nEnvironment: `{config.base_url}`"
-        dm_text += f"\nTenant: `{config.tenant_id}`"
+        # paventhan gets the full run summary on every scheduled run,
+        # even when channel notifications are disabled. Reuses the same
+        # text + blocks as the channel post so the DM matches the
+        # channel template verbatim; the workflow resolves the email to
+        # a user_id via users.lookupByEmail and overwrites `channel`
+        # before posting.
+        dm_payload = {
+            "text": build_fallback_text(report),
+            "blocks": build_main_blocks(report),
+            "recipient_email": "paventhan@terzocloud.com",
+        }
         dm_payload_path = output_dir / "slack-dm-payload.json"
-        dm_payload_path.write_text(
-            _json.dumps({"text": dm_text, "recipient_email": "paventhan@terzocloud.com"}),
-            encoding="utf-8",
-        )
+        dm_payload_path.write_text(_json.dumps(dm_payload), encoding="utf-8")
         print(f"  Slack DM payload (paventhan): {dm_payload_path}")
 
 

@@ -3,7 +3,14 @@
 The three upload paths (bulk-upload, presigned-upload, UI contract-drive)
 diverge in how they introduce a document to the pipeline, but converge on
 the same downstream verification: walk a fixed list of pipeline stages
-and, for each one, wait on Event Hub for the matching ``data.action``.
+and, for each one, wait on Event Hub for the matching CloudEvents ``type``
+(e.g. ``com.terzo.document.ocr.queued``).
+
+Matching on ``type`` rather than ``data.action`` is deliberate — ``type`` is
+CloudEvents-mandatory and present on every event, while ``data.action`` is
+producer-specific and missing on events like ``ocr.completed``. Each stage
+also carries a short ``step_name`` (e.g. ``ocr.queued``) that's rendered
+verbatim in the Slack summary and HTML report.
 
 This module owns that convergence. Tests call :func:`run_pipeline_stages`
 once and get identical reporting semantics: per-stage PASS/FAIL/SKIPPED
@@ -32,6 +39,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Terminal action emitted by the pipeline when a document fails. Detected
+# via ``data.action`` (not CloudEvents ``type``) because the pipeline has
+# historically carried its terminal signal on the action field — keeping
+# this path on action avoids a behavior change for failure detection
+# while the rest of the walker migrates to type-based matching.
 FAILURE_ACTION = "FAILED"
 
 # Per-stage wall-clock budget. Each stage gets a fresh 10-minute timer
@@ -50,60 +62,59 @@ EVENT_HUB_UNSET_REASON = (
 class PipelineStage:
     """One row in the pipeline report that waits on Event Hub.
 
-    ``action`` = None means "first event captured for this ufid wins"
-    (used for the Event Hub stage, which just proves the listener is
-    receiving traffic for the document). A tuple of action strings means
-    "any of these actions satisfies the stage". Each stage's ``timeout_s``
-    starts fresh when the stage is entered, so the per-stage budget does
-    not bleed between stages.
+    ``event_type`` — CloudEvents ``type`` the stage waits for. A tuple
+    means "any of these types satisfies the stage".
+    ``step_name`` — short stage label (e.g. ``ocr.queued``) shown verbatim
+    in the Slack summary and HTML report, derived from the CloudEvents
+    type suffix so the two stay in lockstep.
+    Each stage's ``timeout_s`` starts fresh when the stage is entered, so
+    the per-stage budget does not bleed between stages.
     """
 
     service: str
-    description: str
-    action: str | tuple[str, ...] | None
-    timeout_s: float
+    step_name: str
+    event_type: str | tuple[str, ...]
+    timeout_s: float = STAGE_TIMEOUT_S
 
 
 # Tuple (not list) so the module-level default exposed via
 # ``skip_all_stages(stages=PIPELINE_STAGES)`` and
 # ``run_pipeline_stages(stages=PIPELINE_STAGES)`` cannot be mutated
 # in-place by a caller who thought they were working on a local copy.
+#
+# Stage order follows the CloudEvents the pipeline emits for a document:
+# upload.queued → uploaded → ocr.queued → ocr.completed →
+# auto_extraction.queued → auto_extraction.completed.
 PIPELINE_STAGES: tuple[PipelineStage, ...] = (
     PipelineStage(
-        service="Event Hub",
-        description="Event Hub listener received first event for ufid",
-        action=None,
-        timeout_s=STAGE_TIMEOUT_S,
+        service="File Ingestion Service",
+        step_name="upload.queued",
+        event_type="com.terzo.document.upload.queued",
     ),
     PipelineStage(
         service="File Ingestion Service",
-        description="Upload queued",
-        action="UPLOAD_QUEUED",
-        timeout_s=STAGE_TIMEOUT_S,
-    ),
-    PipelineStage(
-        service="File Ingestion Service",
-        description="Upload completed",
-        action="UPLOADED",
-        timeout_s=STAGE_TIMEOUT_S,
+        step_name="uploaded",
+        event_type="com.terzo.document.uploaded",
     ),
     PipelineStage(
         service="OCR Service",
-        description="OCR queued",
-        action="OCR_QUEUED",
-        timeout_s=STAGE_TIMEOUT_S,
+        step_name="ocr.queued",
+        event_type="com.terzo.document.ocr.queued",
     ),
     PipelineStage(
-        service="Extraction Service",
-        description="Extraction queued",
-        action="EXTRACTION_QUEUED",
-        timeout_s=STAGE_TIMEOUT_S,
+        service="OCR Service",
+        step_name="ocr.completed",
+        event_type="com.terzo.document.ocr.completed",
     ),
     PipelineStage(
-        service="Extraction Service",
-        description="Extraction completed",
-        action="EXTRACTION_COMPLETED",
-        timeout_s=STAGE_TIMEOUT_S,
+        service="Auto Extraction Service",
+        step_name="auto_extraction.queued",
+        event_type="com.terzo.document.auto_extraction.queued",
+    ),
+    PipelineStage(
+        service="Auto Extraction Service",
+        step_name="auto_extraction.completed",
+        event_type="com.terzo.document.auto_extraction.completed",
     ),
 )
 
@@ -124,7 +135,7 @@ def skip_all_stages(
     """
     for stage in stages:
         pipeline_report.record_step(
-            ufid, stage.service, stage.description,
+            ufid, stage.service, stage.step_name,
             StepStatus.SKIPPED,
             details=reason,
         )
@@ -147,16 +158,18 @@ def attach_events_to_last_step(
     if trace and trace.steps:
         trace.steps[-1].events = event_listener.events_for(ufid)
 
+    captured_types = event_listener.types_for(ufid)
     captured_actions = event_listener.actions_for(ufid)
     events = event_listener.events_for(ufid)
     logger.info(
-        "Event Hub summary for ufid=%s: %d event(s) captured, distinct actions=%s",
-        ufid, len(events), captured_actions or "[]",
+        "Event Hub summary for ufid=%s: %d event(s) captured, "
+        "distinct types=%s distinct actions=%s",
+        ufid, len(events), captured_types or "[]", captured_actions or "[]",
     )
     for event in events:
         logger.info(
-            "  captured: action=%s id=%s document_id=%s partition=%s seq=%d received_at=%s",
-            event.action, event.event_id, event.document_id,
+            "  captured: type=%s action=%s id=%s document_id=%s partition=%s seq=%d received_at=%s",
+            event.event_type, event.action, event.event_id, event.document_id,
             event.partition_id, event.sequence_number, event.received_at,
         )
 
@@ -213,7 +226,7 @@ async def run_pipeline_stages(
             aborted = True
             reason = failure_reason(event_listener, ufid)
             pipeline_report.record_step(
-                ufid, stage.service, stage.description,
+                ufid, stage.service, stage.step_name,
                 StepStatus.FAIL,
                 details=(
                     f"Pipeline aborted — action={FAILURE_ACTION} received. "
@@ -222,28 +235,19 @@ async def run_pipeline_stages(
             )
             continue
 
-        # Per-stage timeout: `wait_for_event` / `wait_for_any_event` compute
-        # their own deadline from `time.monotonic()` on each call, so the
-        # budget resets cleanly when we advance from one stage to the next.
+        # Per-stage timeout: `wait_for_event_type` computes its own deadline
+        # from `time.monotonic()` on each call, so the budget resets cleanly
+        # when we advance from one stage to the next.
         try:
-            if stage.action is None:
-                event = await event_listener.wait_for_any_event(
-                    ufid, timeout=stage.timeout_s
-                )
-                detail_prefix = (
-                    f"First event for ufid: action={event.action} "
-                    f"id={event.event_id} at {event.received_at}"
-                )
-            else:
-                event = await event_listener.wait_for_event(
-                    ufid, stage.action, timeout=stage.timeout_s
-                )
-                detail_prefix = (
-                    f"action={event.action} id={event.event_id} "
-                    f"received at {event.received_at}"
-                )
+            event = await event_listener.wait_for_event_type(
+                ufid, stage.event_type, timeout=stage.timeout_s
+            )
+            detail_prefix = (
+                f"type={event.event_type} id={event.event_id} "
+                f"received at {event.received_at}"
+            )
             pipeline_report.record_step(
-                ufid, stage.service, stage.description,
+                ufid, stage.service, stage.step_name,
                 StepStatus.PASS,
                 details=(
                     f"{detail_prefix} "
@@ -257,7 +261,7 @@ async def run_pipeline_stages(
                 aborted = True
                 reason = failure_reason(event_listener, ufid)
                 pipeline_report.record_step(
-                    ufid, stage.service, stage.description,
+                    ufid, stage.service, stage.step_name,
                     StepStatus.FAIL,
                     details=(
                         f"action={FAILURE_ACTION} received during wait. "
@@ -269,19 +273,18 @@ async def run_pipeline_stages(
             # Hard timeout with no failure action — force-kill the run.
             # Record this stage FAIL, remaining stages SKIPPED (they
             # genuinely never ran), attach captured events, then abort.
-            expected_label = stage.action or "<any event for ufid>"
             timeout_msg = (
                 f"Timed out after {stage.timeout_s:.0f}s waiting for "
-                f"action={expected_label}. {type(e).__name__}: {e}"
+                f"type={stage.event_type}. {type(e).__name__}: {e}"
             )
             pipeline_report.record_step(
-                ufid, stage.service, stage.description,
+                ufid, stage.service, stage.step_name,
                 StepStatus.FAIL,
                 details=timeout_msg,
             )
             for later in stages[stage_idx + 1:]:
                 pipeline_report.record_step(
-                    ufid, later.service, later.description,
+                    ufid, later.service, later.step_name,
                     StepStatus.SKIPPED,
                     details=(
                         f"Skipped — run force-killed after {stage.service} "

@@ -32,7 +32,7 @@ The Nebula document processing pipeline spans **four** independent microservices
 
 | Service | Role |
 |---------|------|
-| **Document Service** | Upload orchestration, bulk-upload acceptance, metadata, event routing |
+| **File Ingestion Service** | Upload orchestration, bulk-upload acceptance, metadata, event routing |
 | **OCR Service** | OCR via Azure Document Intelligence |
 | **Extraction Service** | AI data extraction from OCR output |
 | **Ingestion Service** | Final ingestion into downstream systems (Drive, search, analytics) |
@@ -123,7 +123,7 @@ GitHub Actions (`workflow_dispatch` dropdown on **E2E Nightly**) exposes the sam
   │     202 Accepted  → { results: [{ ufid, status: FILE_UPLOAD_QUEUED }]│
   │              │                                                       │
   │              ▼                                                       │
-  │   Document Service ──► fetches sourceUrl ──► writes to Blob          │
+  │   File Ingestion Svc ──► fetches sourceUrl ──► writes to Blob        │
   │        │                                                             │
   │        │     ┌──── Azure Event Hub Namespace ────────────────────┐   │
   │        │     │  terzo-ai-nebula-events-dev                       │   │
@@ -167,7 +167,7 @@ GitHub Actions (`workflow_dispatch` dropdown on **E2E Nightly**) exposes the sam
        │  4. Poll GET /api/v1/documents/{ufid}  → processingState
        │  5. GET  /api/v1/documents/{ufid}/artifacts
        ▼
-   gateway → Document Service → ... (same downstream pipeline)
+   gateway → File Ingestion Service → ... (same downstream pipeline)
 ```
 
 ### Where files come from
@@ -392,7 +392,7 @@ The primary daily-run test. Submits one bulk-upload item, then watches Event Hub
 
 | Step | Service | Action (`data.action`) | Per-stage timeout |
 |------|---------|------------------------|-------------------|
-| 01 | **Document Service** | `POST /api/v1/documents/bulk-upload` → HTTP 202, ufid extracted | — |
+| 01 | **File Ingestion Service** | `POST /api/v1/documents/bulk-upload` → HTTP 202, ufid extracted | — |
 | 02 | **Event Hub** | First event captured for the ufid (proves listener wiring) | 600s |
 | 03 | **Upload Service** | `UPLOAD_QUEUED` | 600s |
 | 04 | **Upload Service** | `UPLOAD` | 600s |
@@ -853,7 +853,7 @@ Both workflows upload two artifacts on every run (success or failure):
 - **"Pipeline Flow - \<Test Case\>" panels** — one per test case (`Bulk Upload`, `UI File Upload endpoint`). Each panel shows:
   - File count + per-UFID status chips
   - **Captured response body** from the upload endpoint (auto-masked for secrets)
-  - **Collapsible UFID cards** — each card expands to reveal that UFID's stage-by-stage flow graph (Document Service → Event Hub → OCR → Extraction) and its Event Hub timeline with JSON payloads
+  - **Collapsible UFID cards** — each card expands to reveal that UFID's stage-by-stage flow graph (File Ingestion Service → Event Hub → OCR → Extraction) and its Event Hub timeline with JSON payloads
 - **Errors banner** — any session-level failures (auth, fixture setup, etc.)
 
 Open the artifact directly in a browser — no server, no allure CLI needed.

@@ -9,8 +9,8 @@ execution, then renders a self-contained HTML report with:
   * Captured log stream (collapsible, color-coded by level)
   * Errors banner
   * Pipeline flow graph per document:
-      Document Service (uploaded/failed) → Event Hub → OCR → AI Extraction → Ingestion
-    Stages downstream of Document Service derive their status from Event Hub events.
+      File Ingestion Service (uploaded/failed) → Event Hub → OCR → AI Extraction → Ingestion
+    Stages downstream of File Ingestion Service derive their status from Event Hub events.
 """
 
 from __future__ import annotations
@@ -572,13 +572,13 @@ def _logs_html(report: PipelineReport) -> str:
 # --- Pipeline flow graph ---------------------------------------------------
 
 # Stages in the pipeline flow graph, left to right. Each stage aggregates steps
-# whose `service` matches any of the listed names. Stages after Document Service
-# are driven entirely by Event Hub events captured during the run.
+# whose `service` matches any of the listed names. Stages after File Ingestion
+# Service are driven entirely by Event Hub events captured during the run.
 _FLOW_STAGES: list[tuple[str, tuple[str, ...]]] = [
-    ("Document Service", ("Document Service", "UI / Drive")),
-    ("Event Hub",        ("Event Hub",)),
-    ("OCR",              ("OCR Service",)),
-    ("Extraction",       ("Extraction Service",)),
+    ("File Ingestion Service", ("File Ingestion Service", "UI / Drive")),
+    ("Event Hub",              ("Event Hub",)),
+    ("OCR",                    ("OCR Service",)),
+    ("Extraction",             ("Extraction Service",)),
 ]
 
 _FLOW_ICONS: dict[StepStatus, str] = {
@@ -615,7 +615,7 @@ def _stage_substatus(
         return "skipped"
     if status in (StepStatus.PARTIAL, StepStatus.PENDING):
         return "partial"
-    if stage_name == "Document Service":
+    if stage_name == "File Ingestion Service":
         return "uploaded"
     if stage_name == "Event Hub":
         return "no failures"

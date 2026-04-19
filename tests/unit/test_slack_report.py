@@ -35,10 +35,10 @@ pytestmark = pytest.mark.filterwarnings("ignore")
 
 
 _PIPELINE_STAGES = [
-    ("Document Service", "bulk-upload accepted (HTTP 202)"),
+    ("File Ingestion Service", "bulk-upload accepted (HTTP 202)"),
     ("Event Hub", "first event received"),
-    ("Document Service", "upload queued"),
-    ("Document Service", "upload completed"),
+    ("File Ingestion Service", "upload queued"),
+    ("File Ingestion Service", "upload completed"),
     ("OCR Service", "OCR queued"),
     ("Extraction Service", "extraction queued"),
     ("Extraction Service", "extraction completed"),
@@ -257,7 +257,7 @@ def test_thread_reply_marks_the_failing_stage() -> None:
     passing_section = _find_section_containing(blocks, "*UI File Upload*")
 
     # Failing scenario expands all stages, with the failing one flagged.
-    assert failing_section.count(":white_check_mark: Document Service") >= 1
+    assert failing_section.count(":white_check_mark: File Ingestion Service") >= 1
     assert ":x: Extraction Service — extraction completed" in failing_section
     assert "← FAILED HERE" in failing_section
     # Only one stage gets the ← FAILED HERE marker even if later stages

@@ -13,10 +13,10 @@ The test:
        contract-drive endpoint.
     2. Assert HTTP 200 and capture the response body into the pipeline
        report so it renders under the test-case panel.
-    3. If the response carries a ufid, watch Event Hub through the same
-       pipeline stages bulk-upload tracks. If it doesn't, the test still
-       passes on the upload-accepted check alone — we don't fail the
-       whole run over an undocumented response shape.
+    3. If the response carries a ufid, hand off to the shared Event Hub
+       walker. If it doesn't, the test still passes on the upload-accepted
+       check alone — we don't fail the whole run over an undocumented
+       response shape.
 """
 
 from __future__ import annotations
@@ -28,14 +28,9 @@ import pytest
 
 from lib.api_clients.contract_drive import ContractDriveClient
 from lib.config import E2EConfig
+from lib.pipeline_runner import run_pipeline_stages, skip_all_stages
 from lib.report import PipelineReport, StepStatus
 from lib.run_context import RunContext
-from tests.api.test_bulk_upload import (
-    FAILURE_ACTION,
-    PIPELINE_STAGES,
-    _attach_events_to_last_step,
-    _failure_reason,
-)
 
 if TYPE_CHECKING:
     from lib.event_hub import EventHubListener
@@ -105,122 +100,26 @@ async def test_ui_file_upload_full_pipeline(
         detail += f", ufid={response.ufid}"
     pipeline_report.record_step(
         ufid,
-        "Document Service",
+        "File Ingestion Service",
         "UI contract-drive upload accepted (HTTP 200)",
         StepStatus.PASS,
         details=detail,
     )
 
     # ------------------------------------------------------------------
-    # Stages 2+ — only runnable when the response contained a real ufid
-    # AND Event Hub is configured. Otherwise record SKIPPED so the report
-    # still shows the intended pipeline shape and why it didn't run.
+    # Event Hub stages — only runnable when the response carried a real
+    # ufid. Otherwise record SKIPPED so the report still shows the
+    # intended pipeline shape and why it didn't run.
     # ------------------------------------------------------------------
     if not response.ufid:
-        for stage in PIPELINE_STAGES:
-            pipeline_report.record_step(
-                ufid, stage.service, stage.description,
-                StepStatus.SKIPPED,
-                details="No ufid in UI upload response — pipeline tracking skipped.",
-            )
+        skip_all_stages(
+            pipeline_report, ufid,
+            reason="No ufid in UI upload response — pipeline tracking skipped.",
+        )
         return
 
-    if event_listener is None:
-        for stage in PIPELINE_STAGES:
-            pipeline_report.record_step(
-                ufid, stage.service, stage.description,
-                StepStatus.SKIPPED,
-                details="Event Hub not configured (E2E_EVENT_HUB_CONNECTION_STRING unset)",
-            )
-        pytest.skip("Event Hub not configured — pipeline event verification skipped")
-
-    await event_listener.watch(ufid)
-
-    aborted = False
-    for stage_idx, stage in enumerate(PIPELINE_STAGES):
-        if aborted or event_listener.has_event(ufid, FAILURE_ACTION):
-            aborted = True
-            failure_reason = _failure_reason(event_listener, ufid)
-            pipeline_report.record_step(
-                ufid, stage.service, stage.description,
-                StepStatus.FAIL,
-                details=(
-                    f"Pipeline aborted — action={FAILURE_ACTION} received. "
-                    f"failure_reason: {failure_reason}"
-                ),
-            )
-            continue
-
-        try:
-            if stage.action is None:
-                event = await event_listener.wait_for_any_event(
-                    ufid, timeout=stage.timeout_s
-                )
-                detail_prefix = (
-                    f"First event for ufid: action={event.action} "
-                    f"id={event.event_id} at {event.received_at}"
-                )
-            else:
-                event = await event_listener.wait_for_event(
-                    ufid, stage.action, timeout=stage.timeout_s
-                )
-                detail_prefix = (
-                    f"action={event.action} id={event.event_id} "
-                    f"received at {event.received_at}"
-                )
-            pipeline_report.record_step(
-                ufid, stage.service, stage.description,
-                StepStatus.PASS,
-                details=(
-                    f"{detail_prefix} "
-                    f"(partition={event.partition_id}, seq={event.sequence_number})"
-                ),
-            )
-        except Exception as e:
-            if event_listener.has_event(ufid, FAILURE_ACTION):
-                aborted = True
-                failure_reason = _failure_reason(event_listener, ufid)
-                pipeline_report.record_step(
-                    ufid, stage.service, stage.description,
-                    StepStatus.FAIL,
-                    details=(
-                        f"action={FAILURE_ACTION} received during wait. "
-                        f"failure_reason: {failure_reason}"
-                    ),
-                )
-                continue
-
-            expected_label = stage.action or "<any event for ufid>"
-            timeout_msg = (
-                f"Timed out after {stage.timeout_s:.0f}s waiting for "
-                f"action={expected_label}. {type(e).__name__}: {e}"
-            )
-            pipeline_report.record_step(
-                ufid, stage.service, stage.description,
-                StepStatus.FAIL,
-                details=timeout_msg,
-            )
-            for later in PIPELINE_STAGES[stage_idx + 1:]:
-                pipeline_report.record_step(
-                    ufid, later.service, later.description,
-                    StepStatus.SKIPPED,
-                    details=(
-                        f"Skipped — run force-killed after {stage.service} "
-                        f"timed out ({stage.timeout_s:.0f}s per-stage budget)."
-                    ),
-                )
-            _attach_events_to_last_step(pipeline_report, event_listener, ufid)
-            pytest.fail(
-                f"Pipeline force-killed for {ufid}: {stage.service} stage "
-                f"exceeded its {stage.timeout_s:.0f}s budget. {timeout_msg}"
-            )
-
-    if event_listener.has_event(ufid, FAILURE_ACTION):
-        failure_reason = _failure_reason(event_listener, ufid)
-        _attach_events_to_last_step(pipeline_report, event_listener, ufid)
-        pytest.fail(
-            f"Pipeline failed for {ufid}: action={FAILURE_ACTION} received. "
-            f"failure_reason: {failure_reason}"
-        )
-
-    _attach_events_to_last_step(pipeline_report, event_listener, ufid)
+    await run_pipeline_stages(
+        ufid,
+        event_listener=event_listener,
+        pipeline_report=pipeline_report,
+    )

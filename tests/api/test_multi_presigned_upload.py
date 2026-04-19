@@ -86,7 +86,7 @@ async def test_multi_presigned_upload_all_reach_extraction_queued(
         filename = test_file.name
         pipeline_report.add_document(ufid, filename)
         pipeline_report.record_step(
-            ufid, "Document Service",
+            ufid, "File Ingestion Service",
             "Upload + Confirm",
             StepStatus.PASS,
             details="Presigned upload \u2192 Confirmed \u2713",

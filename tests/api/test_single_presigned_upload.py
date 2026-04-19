@@ -68,8 +68,8 @@ async def test_presigned_upload_reaches_extraction_queued(
     await doc_client.upload_to_sas(upload.upload_url, test_file.content)
 
     pipeline_report.record_step(
-        ufid, "Document Service",
-        "Document Service \u2014 Ingest",
+        ufid, "File Ingestion Service",
+        "File Ingestion Service \u2014 Ingest",
         StepStatus.PASS,
         details=(
             "Blob storage upload \u2713\n"
@@ -124,8 +124,8 @@ async def test_presigned_upload_reaches_extraction_queued(
         )
     except PollTimeoutError:
         pipeline_report.record_step(
-            ufid, "Document Service",
-            "Document Service \u2014 State Update",
+            ufid, "File Ingestion Service",
+            "File Ingestion Service \u2014 State Update",
             StepStatus.FAIL,
             details="\u00d7 Timed out waiting for OCR_COMPLETED",
         )
@@ -147,8 +147,8 @@ async def test_presigned_upload_reaches_extraction_queued(
     )
 
     pipeline_report.record_step(
-        ufid, "Document Service",
-        "Document Service \u2014 State Update",
+        ufid, "File Ingestion Service",
+        "File Ingestion Service \u2014 State Update",
         StepStatus.PASS,
         details=f"processing_state \u2192 EXTRACTION_QUEUED \u2713\n" + "\n".join(artifact_details),
     )

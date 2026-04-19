@@ -1,23 +1,25 @@
-"""E2E: UI file upload via `POST /_/api/contract-drive/{drive_id}/add`.
+"""E2E: UI file upload via the 3-step contract-drive flow.
 
-This is the endpoint the Contract Drive UI hits when a user drops a file
-into the drive. Unlike bulk-upload (which runs against the Nebula
-gateway and uses a Bearer token), this endpoint lives on the Analytics
-host (``mafia.terzocloud.com``) and is session-authenticated with
-``X-XSRF-TOKEN`` + ``Cookie`` — the same credentials the Analytics
-login step already has.
+The Contract Drive UI now uploads in three legs:
+
+    1. POST /_/api/contract-drive/{drive_id}/upload → ufid + SAS URL.
+    2. PUT <SAS URL> with the file bytes (Azure Blob).
+    3. POST /_/api/contract-drive/{drive_id}/confirm-upload.
+
+Steps 1 and 3 live on the Analytics host (``mafia.terzocloud.com``) and
+are session-authenticated with ``X-XSRF-TOKEN`` + ``Cookie``. Step 2
+talks directly to Azure Blob via the SAS URL returned by step 1 — no
+session auth involved.
 
 The test:
 
-    1. POST multipart/form-data (file + drive={"driveId": <id>}) to the
-       contract-drive endpoint.
-    2. Assert HTTP 200 and capture the response body into the pipeline
-       report so it renders under the test-case panel.
-    3. If the response carries a ufid, use it directly. If not (the
-       contract-drive response doesn't reliably include one), resolve
-       the ufid by paginating doc-reader and filtering on the filename
-       we uploaded. Either way, the ufid is then handed to the shared
-       Event Hub walker for pipeline verification.
+    1. Run the full 3-step upload; each leg raises on non-2xx.
+    2. Record the aggregate result into the pipeline report so the
+       init response (ufid + uploadUrl) renders under the test-case panel.
+    3. Hand the ufid (returned directly in step 1) to the shared Event
+       Hub walker for pipeline verification. If init didn't carry a
+       ufid for some reason, fall back to a filename lookup against
+       doc-reader before giving up.
 """
 
 from __future__ import annotations
@@ -61,13 +63,9 @@ async def test_ui_file_upload_full_pipeline(
     event_listener: "EventHubListener | None",
     pipeline_report: PipelineReport,
 ) -> None:
-    """Upload one file through the UI contract-drive endpoint and verify
-    the pipeline progression, resolving the ufid via doc-reader when the
-    UI response doesn't include one.
-
-    Uses the same per-run generated Contract Agreement PDF as the
-    bulk-upload test, so scheduled runs never collide with a cached
-    body on the server side.
+    """Upload one file through the UI contract-drive 3-step flow and
+    verify pipeline progression. The init step returns the ufid
+    directly; we fall back to a doc-reader lookup only if it doesn't.
     """
     # Unique suffix so doc-reader's filename filter resolves the ufid for
     # this run's UI upload and not the bulk-upload test's identically-
@@ -75,32 +73,30 @@ async def test_ui_file_upload_full_pipeline(
     filename = f"nebulae2etest-{run_ctx.run_id}-ui.pdf"
 
     # ------------------------------------------------------------------
-    # Stage 1 — UI endpoint: PASS when we get HTTP 200.
+    # Stage 1 — UI endpoint: PASS when all three legs succeed. The client
+    # already raises on any non-2xx, so reaching this point means every
+    # leg returned 2xx; we don't pin to exactly 200 because confirm-upload
+    # legitimately returns 201/202/204 when ingestion is enqueued async.
     # ------------------------------------------------------------------
-    response = await contract_drive_client.add_file(
+    result = await contract_drive_client.upload_file(
         drive_id=config.ui_upload_drive_id,
         filename=filename,
         content=generated_contract_pdf,
         content_type="application/pdf",
     )
 
-    assert response.status_code == 200, (
-        f"UI file upload expected HTTP 200, got {response.status_code}. "
-        f"raw={response.raw}"
-    )
-
     # ------------------------------------------------------------------
-    # Stage 2 — Resolve the ufid. Prefer the response body; fall back to
-    # a doc-reader lookup paginated by filename. Only after we have (or
-    # give up on) the ufid do we register the document in the report, so
-    # the document key matches reality.
+    # Stage 2 — Resolve the ufid. The init response carries it directly,
+    # so the doc-reader branch is belt-and-braces: upload_file() already
+    # raises if init returns without a ufid, so this only triggers if
+    # the contract ever changes to return the ufid async.
     # ------------------------------------------------------------------
-    resolved_ufid = response.ufid
+    resolved_ufid = result.ufid
     resolved_via_doc_reader = False
     if not resolved_ufid:
         logger.info(
-            "UI upload response carried no ufid — resolving via doc-reader by "
-            "filename=%s (timeout=%.0fs)",
+            "UI upload init response carried no ufid — resolving via "
+            "doc-reader by filename=%s (timeout=%.0fs)",
             filename, DOC_READER_RESOLVE_TIMEOUT_S,
         )
         resolved_ufid = await doc_reader_client.wait_for_ufid_by_name(
@@ -116,24 +112,29 @@ async def test_ui_file_upload_full_pipeline(
         ufid,
         filename,
         test_case=TEST_CASE_NAME,
-        response_body=response.raw,
+        response_body=result.init_raw,
     )
     print(
-        f"\nui-file-upload → status={response.status_code} "
-        f"ufid_in_response={response.ufid} resolved_ufid={resolved_ufid} "
-        f"raw={response.raw}"
+        f"\nui-file-upload → init={result.init_status_code} "
+        f"put={result.blob_put_status_code} "
+        f"confirm={result.confirm_status_code} "
+        f"ufid_in_response={result.ufid} resolved_ufid={resolved_ufid} "
+        f"init_raw={result.init_raw}"
     )
 
+    drive_id = config.ui_upload_drive_id
     detail = (
-        f"POST /_/api/contract-drive/{config.ui_upload_drive_id}/add → "
-        f"HTTP {response.status_code}"
+        f"3-step upload OK: "
+        f"POST /_/api/contract-drive/{drive_id}/upload → HTTP {result.init_status_code}; "
+        f"PUT <blob> → HTTP {result.blob_put_status_code}; "
+        f"POST /_/api/contract-drive/{drive_id}/confirm-upload → HTTP {result.confirm_status_code}"
     )
-    if response.ufid:
-        detail += f", ufid={response.ufid}"
+    if result.ufid:
+        detail += f", ufid={result.ufid}"
     pipeline_report.record_step(
         ufid,
         "File Ingestion Service",
-        "UI contract-drive upload accepted (HTTP 200)",
+        "UI contract-drive upload accepted (init + blob PUT + confirm)",
         StepStatus.PASS,
         details=detail,
     )

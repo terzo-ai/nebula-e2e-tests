@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from lib.blob_upload import put_to_sas_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -266,26 +268,15 @@ class GatewayFileIngestionClient:
     ) -> int:
         """PUT raw bytes directly to the presigned Azure Blob SAS URL.
 
-        Uses a one-shot client so the Bearer / X-Tenant-Id headers carried
-        by the gateway client do not leak into the Azure Blob request
-        (Azure rejects unknown headers on SAS PUTs).
+        Delegates to :func:`lib.blob_upload.put_to_sas_url` so the same
+        bearer-free one-shot client is used for both the gateway
+        presigned flow and the UI contract-drive flow (Azure rejects
+        unknown headers on SAS PUTs).
         """
-        async with httpx.AsyncClient(timeout=120.0) as raw_client:
-            resp = await raw_client.put(
-                upload_url,
-                content=file_bytes,
-                headers={
-                    "x-ms-blob-type": "BlockBlob",
-                    "Content-Type": content_type,
-                },
-            )
-            if resp.status_code >= 400:
-                raise RuntimeError(
-                    f"Azure Blob PUT failed: {resp.status_code} {resp.reason_phrase}\n"
-                    f"  url: {upload_url.split('?')[0]}\n"
-                    f"  response body: {resp.text[:2000] or '(empty)'}"
-                )
-            return resp.status_code
+        resp = await put_to_sas_url(
+            upload_url, file_bytes, content_type=content_type,
+        )
+        return resp.status_code
 
     async def mark_file_uploaded(self, ufid: str, name: str) -> FileUploadedResponse:
         """POST {base_url}/nebula/file-ingestion/api/v1/documents/{ufid}/file-uploaded.

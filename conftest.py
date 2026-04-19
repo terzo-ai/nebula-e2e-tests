@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from lib.api_clients.contract_drive import ContractDriveClient
+from lib.api_clients.doc_reader import DocReaderClient
 from lib.api_clients.file_ingestion import FileIngestionClient
 from lib.api_clients.gateway_file_ingestion import GatewayFileIngestionClient
 from lib.auth import (
@@ -288,6 +289,25 @@ async def gateway_doc_client(
 ) -> GatewayFileIngestionClient:
     """Client targeting file-ingestion via the terzoai-gateway (for bulk-upload etc.)."""
     client = GatewayFileIngestionClient(
+        base_url=config.base_url,
+        tenant_id=config.tenant_id,
+        access_token=access_token,
+    )
+    yield client
+    await client.close()
+
+
+@pytest.fixture
+async def doc_reader_client(
+    config: E2EConfig, access_token: str
+) -> DocReaderClient:
+    """Client for the Nebula doc-reader service (paginated document listing).
+
+    Used by upload flows that don't return a ufid directly (e.g. UI
+    contract-drive). The same gateway host + Bearer token are reused,
+    so no extra auth wiring is required.
+    """
+    client = DocReaderClient(
         base_url=config.base_url,
         tenant_id=config.tenant_id,
         access_token=access_token,

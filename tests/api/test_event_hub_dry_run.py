@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 
 LISTEN_SECONDS = 60
 
-TARGET_UFIDS: tuple[str, ...] = ()
+TARGET_UFIDS: tuple[str, ...] = (
+    "69f6f133-937f-40f6-90f7-c37bc57edb88",
+    "dc848e68-1618-475b-ab04-bbab9e0b28ce",
+)
 
 HUB_NAMES: tuple[str, ...] = (
     "terzo-ai-contract-document-events",

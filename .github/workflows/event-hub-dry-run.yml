@@ -1,0 +1,25 @@
+name: Event Hub Dry Run
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run Event Hub dry-run
+        run: uv run pytest tests/api/test_event_hub_dry_run.py -v -s --log-cli-level=WARNING --timeout=600
+        env:
+          E2E_EVENT_HUB_CONNECTION_STRING: ${{ secrets.E2E_EVENT_HUB_CONNECTION_STRING }}
+          E2E_EVENT_HUB_NAME: ${{ vars.E2E_EVENT_HUB_NAME }}
+          E2E_EVENT_HUB_CONSUMER_GROUP: probe-test

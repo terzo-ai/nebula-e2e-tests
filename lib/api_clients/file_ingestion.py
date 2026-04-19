@@ -3,6 +3,8 @@ from typing import Any
 
 import httpx
 
+from lib.blob_upload import put_to_sas_url
+
 
 @dataclass
 class UploadInitiation:
@@ -116,8 +118,6 @@ class FileIngestionClient:
 
     async def upload_to_sas(self, sas_url: str, file_bytes: bytes, content_type: str = "application/pdf") -> None:
         """Upload file bytes directly to Azure Blob via the presigned SAS URL."""
-        from lib.blob_upload import put_to_sas_url
-
         await put_to_sas_url(sas_url, file_bytes, content_type=content_type)
 
     async def confirm_upload(self, ufid: str) -> DocumentResponse:

@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from lib.blob_upload import put_to_sas_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -271,8 +273,6 @@ class GatewayFileIngestionClient:
         presigned flow and the UI contract-drive flow (Azure rejects
         unknown headers on SAS PUTs).
         """
-        from lib.blob_upload import put_to_sas_url
-
         resp = await put_to_sas_url(
             upload_url, file_bytes, content_type=content_type,
         )

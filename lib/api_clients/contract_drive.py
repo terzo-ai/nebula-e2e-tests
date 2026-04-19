@@ -63,32 +63,19 @@ def _json_body(resp: httpx.Response) -> dict[str, Any]:
     return body if isinstance(body, dict) else {"_raw": body}
 
 
-def _extract_ufid(data: Any) -> str | None:
-    """Best-effort ufid extraction from a JSON body.
+def _top_level_str(data: Any, key: str) -> str | None:
+    """Return ``data[key]`` if it's a non-empty string, else ``None``.
 
-    The init response carries ``ufid`` at the top level, but we also
-    check ``document_id`` / ``documentId`` and one level deep under
-    ``data`` / ``result`` to stay resilient if the shape shifts.
+    The init response is a flat JSON object with ``ufid`` and
+    ``uploadUrl`` at the top level, so both fields go through the same
+    accessor — if the shape ever nests, the test fails loudly at the
+    ``missing ufid/uploadUrl`` guard rather than silently resolving
+    from some other path.
     """
     if not isinstance(data, dict):
         return None
-    for key in ("ufid", "document_id", "documentId"):
-        v = data.get(key)
-        if isinstance(v, str) and v:
-            return v
-    for container in ("data", "result"):
-        nested = data.get(container)
-        if isinstance(nested, dict):
-            for key in ("ufid", "document_id", "documentId"):
-                v = nested.get(key)
-                if isinstance(v, str) and v:
-                    return v
-        if isinstance(nested, list) and nested and isinstance(nested[0], dict):
-            for key in ("ufid", "document_id", "documentId"):
-                v = nested[0].get(key)
-                if isinstance(v, str) and v:
-                    return v
-    return None
+    v = data.get(key)
+    return v if isinstance(v, str) and v else None
 
 
 class ContractDriveClient:
@@ -223,9 +210,8 @@ class ContractDriveClient:
         )
         result.init_status_code = init.status_code
         result.init_raw = _json_body(init)
-        result.ufid = _extract_ufid(result.init_raw)
-        upload_url = result.init_raw.get("uploadUrl")
-        result.upload_url = upload_url if isinstance(upload_url, str) else None
+        result.ufid = _top_level_str(result.init_raw, "ufid")
+        result.upload_url = _top_level_str(result.init_raw, "uploadUrl")
 
         if not result.ufid or not result.upload_url:
             raise RuntimeError(

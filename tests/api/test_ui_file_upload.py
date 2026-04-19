@@ -73,7 +73,10 @@ async def test_ui_file_upload_full_pipeline(
     filename = f"nebulae2etest-{run_ctx.run_id}-ui.pdf"
 
     # ------------------------------------------------------------------
-    # Stage 1 — UI endpoint: PASS when all three legs succeed.
+    # Stage 1 — UI endpoint: PASS when all three legs succeed. The client
+    # already raises on any non-2xx, so reaching this point means every
+    # leg returned 2xx; we don't pin to exactly 200 because confirm-upload
+    # legitimately returns 201/202/204 when ingestion is enqueued async.
     # ------------------------------------------------------------------
     result = await contract_drive_client.upload_file(
         drive_id=config.ui_upload_drive_id,
@@ -82,14 +85,11 @@ async def test_ui_file_upload_full_pipeline(
         content_type="application/pdf",
     )
 
-    assert result.confirm_status_code == 200, (
-        f"UI file upload expected confirm-upload HTTP 200, got "
-        f"{result.confirm_status_code}. confirm_raw={result.confirm_raw}"
-    )
-
     # ------------------------------------------------------------------
-    # Stage 2 — Resolve the ufid. The init response carries it directly;
-    # fall back to doc-reader by filename only if something stripped it.
+    # Stage 2 — Resolve the ufid. The init response carries it directly,
+    # so the doc-reader branch is belt-and-braces: upload_file() already
+    # raises if init returns without a ufid, so this only triggers if
+    # the contract ever changes to return the ufid async.
     # ------------------------------------------------------------------
     resolved_ufid = result.ufid
     resolved_via_doc_reader = False

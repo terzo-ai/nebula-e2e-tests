@@ -1,63 +1,114 @@
-"""E2E test: bulk-upload via document-service.
+"""E2E: bulk-upload → observe full pipeline events via Event Hub.
 
-Target: {E2E_BASE_URL}/api/v1/documents/bulk-upload, tenant E2E_TENANT_ID.
-In CI, E2E_BASE_URL is set to the gateway URL:
-  https://terzoai-gateway-dev.terzocloud.com/nebula/document-service
+Invokes POST {E2E_BASE_URL}/api/v1/documents/bulk-upload with a single item,
+extracts the ufid from the response, then hands off to
+:func:`lib.pipeline_runner.run_pipeline_stages` for the shared Event Hub
+verification (same walker the presigned and UI tests use).
 
-Unlike the presigned-upload flow (test_single_presigned_upload.py), bulk-upload
-takes pre-existing sourceUrls — the server pulls each item from its source URL,
-so there's no client-side upload step.
+The HTML pipeline report is rendered at session teardown and uploaded as
+the `pipeline-report-nightly` / `pipeline-report` workflow artifact.
 """
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
 import pytest
 
-from lib.api_clients.document_service import BulkUploadItem, DocumentServiceClient
+from lib.api_clients.gateway_file_ingestion import (
+    BulkUploadItem,
+    GatewayFileIngestionClient,
+)
 from lib.config import E2EConfig
+from lib.pipeline_runner import run_pipeline_stages
+from lib.report import PipelineReport, StepStatus
+from lib.run_context import RunContext
+
+if TYPE_CHECKING:
+    from lib.event_hub import EventHubListener
+
+logger = logging.getLogger(__name__)
 
 
-async def test_bulk_upload_accepts_single_item(
-    doc_client: DocumentServiceClient,
+TEST_CASE_NAME = "Bulk Upload"
+
+# Markers: `-m e2e` runs the whole suite; `-m bulk_upload` targets just this file.
+pytestmark = [pytest.mark.e2e, pytest.mark.bulk_upload]
+
+
+async def test_bulk_upload_full_pipeline(
+    gateway_doc_client: GatewayFileIngestionClient,
     config: E2EConfig,
+    run_ctx: RunContext,
+    event_listener: "EventHubListener | None",
+    pipeline_report: PipelineReport,
+    bulk_upload_source_url: str,
+    generated_contract_pdf: bytes,
 ) -> None:
-    """POST /api/v1/documents/bulk-upload with one item.
+    """Post one bulk-upload item and verify each pipeline stage.
 
-    Mirrors the canonical curl: source=BULK_IMPORT, _truncated=true,
-    _totalItems=1000, single item in items[]. Asserts the server accepts
-    the request (2xx) and returns a parseable JSON body.
+    The per-run `bulk_upload_source_url` fixture uploads a freshly
+    generated Contract Agreement PDF to Azure Blob and returns a 2h SAS
+    URL — so scheduled runs never collide with a stale / cached object.
     """
-    items = [
-        BulkUploadItem(
-            name="tz_nebula_e2e.pdf",
-            content_type="application/pdf",
-            size_bytes=93160,
-            document_type="GENERAL",
-            source_url=config.bulk_upload_source_url,
-        ),
-    ]
+    filename = f"nebulae2etest-{run_ctx.run_id}.pdf"
 
-    result = await doc_client.bulk_upload(
-        items=items,
+    # ------------------------------------------------------------------
+    # Stage 1 — File Ingestion Service: PASS when we get HTTP 202 + ufid.
+    # ------------------------------------------------------------------
+    response = await gateway_doc_client.bulk_upload(
+        items=[
+            BulkUploadItem(
+                name=filename,
+                processing_mode="EXTRACT",
+                content_type="application/pdf",
+                size_bytes=len(generated_contract_pdf),
+                document_type="contract",
+                source_url=bulk_upload_source_url,
+            ),
+        ],
         source="BULK_IMPORT",
-        truncated=True,
-        total_items=1000,
     )
 
-    # Response shape isn't yet locked down — assert we got a JSON body back
-    # (raise_for_status in the client already caught 4xx/5xx) and log it so
-    # assertions can be tightened in a follow-up once the shape is known.
-    assert result is not None, "bulk-upload returned an empty response body"
-    print(f"\nbulk-upload response: {result}")
+    assert response.ufids, (
+        f"bulk-upload response contained no ufid. "
+        f"status={response.status_code} raw={response.raw}"
+    )
+    assert response.status_code == 202, (
+        f"bulk-upload expected HTTP 202 Accepted, got {response.status_code}. "
+        f"raw={response.raw}"
+    )
 
+    ufid = response.ufids[0]
+    run_ctx.register(ufid)
+    pipeline_report.add_document(
+        ufid,
+        filename,
+        test_case=TEST_CASE_NAME,
+        response_body=response.raw,
+    )
+    print(
+        f"\nbulk-upload → status={response.status_code} ufid={ufid} "
+        f"raw={response.raw}"
+    )
 
-@pytest.mark.skip(reason="enable once the batch-status endpoint is identified")
-async def test_bulk_upload_items_reach_processing(
-    doc_client: DocumentServiceClient,
-    config: E2EConfig,
-) -> None:
-    """Placeholder: verify that bulk-uploaded items progress through the pipeline.
+    pipeline_report.record_step(
+        ufid,
+        "File Ingestion Service",
+        "bulk-upload accepted (HTTP 202 + ufid returned)",
+        StepStatus.PASS,
+        details=(
+            f"POST /api/v1/documents/bulk-upload → "
+            f"HTTP {response.status_code}, ufid={ufid}"
+        ),
+    )
 
-    Needs the batch/document status endpoint. Fill in once documented.
-    """
-    raise NotImplementedError
+    # ------------------------------------------------------------------
+    # Event Hub stages — delegated to the shared pipeline walker.
+    # ------------------------------------------------------------------
+    await run_pipeline_stages(
+        ufid,
+        event_listener=event_listener,
+        pipeline_report=pipeline_report,
+    )

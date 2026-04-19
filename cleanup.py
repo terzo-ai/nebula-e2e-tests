@@ -11,7 +11,7 @@ Finds documents by listing tenant 1000012 and filtering by 'e2e-' filename prefi
 import asyncio
 import sys
 
-from lib.api_clients.document_service import DocumentServiceClient
+from lib.api_clients.file_ingestion import FileIngestionClient
 from lib.auth import fetch_access_token
 from lib.config import E2EConfig
 
@@ -23,13 +23,13 @@ async def cleanup_e2e_documents(max_pages: int = 10) -> int:
     """
     config = E2EConfig()
 
-    # Get access token
-    if config.access_token:
-        token = config.access_token
+    # Get bearer token: manual override or two-step auth flow
+    if config.token:
+        token = config.token
     else:
         token = await fetch_access_token(config)
 
-    client = DocumentServiceClient(
+    client = FileIngestionClient(
         base_url=config.base_url,
         tenant_id=config.tenant_id,
         access_token=token,

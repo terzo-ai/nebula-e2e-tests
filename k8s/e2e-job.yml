@@ -1,57 +1,217 @@
 apiVersion: batch/v1
-kind: Job
+kind: CronJob
 metadata:
   name: nebula-e2e-tests
   namespace: terzo-squad
 spec:
-  backoffLimit: 0
-  ttlSecondsAfterFinished: 86400  # auto-delete job after 24h
-  template:
-    metadata:
-      labels:
-        app: nebula-e2e-tests
+  # Twice daily in IST, offset a few minutes off the hour so we don't
+  # collide with other cluster crons.
+  #   12:03 PM IST  =  06:33 UTC
+  #    8:03 PM IST  =  14:33 UTC
+  # Cluster CronJobs fire on the requested minute (no GitHub queue drift)
+  # — which is the entire point of moving off GitHub-hosted runners for
+  # scheduled runs.
+  schedule: "33 6,14 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid         # don't stack jobs if one runs long
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 600      # if missed by >10m, skip (don't catch up)
+  jobTemplate:
     spec:
-      containers:
-      - name: e2e
-        image: python:3.14-slim
-        command:
-        - /bin/sh
-        - -c
-        - |
-          set -e
-          echo "=== Installing uv ==="
-          pip install uv --quiet
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 86400  # auto-delete completed job after 24h
+      template:
+        metadata:
+          labels:
+            app: nebula-e2e-tests
+          annotations:
+            admission.datadoghq.com/enabled: "false"
+        spec:
+          # ------------------------------------------------------------------
+          # Init container: mint a Nebula gateway bearer using the long-lived
+          # dev auth-service key. Auth-service is reachable only from inside
+          # the cluster, so this is the natural place to do it. Token is
+          # written to a shared emptyDir the main container reads as E2E_TOKEN.
+          # ------------------------------------------------------------------
+          initContainers:
+          - name: fetch-token
+            image: curlimages/curl
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Requesting bearer from auth-service-dev1..."
+              TOKEN=$(curl -s --connect-timeout 10 \
+                -X POST "http://auth-service-dev1.product-internal.terzocloud.com/auth/token" \
+                -H "Content-Type: application/json" \
+                -H "X-Access-Token: e9c4455dc79d417b986d0386eb7b3d25" \
+                -d '{"userId":1000129,"email":"paventhan@terzocloud.com","tenantId":1000012,"grantType":"session_token"}' \
+                | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+              if [ -z "$TOKEN" ]; then
+                echo "FAILED: could not extract token from auth-service response"
+                exit 1
+              fi
+              echo "$TOKEN" > /shared/token
+              echo "Token fetched (${#TOKEN} chars)"
+            volumeMounts:
+            - name: shared
+              mountPath: /shared
+          # ------------------------------------------------------------------
+          # Main container: run BOTH bulk-upload + UI upload tests via the
+          # shared `e2e` pytest marker.
+          # ------------------------------------------------------------------
+          containers:
+          - name: e2e
+            image: python:3.12-slim
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              export E2E_TOKEN="$(cat /shared/token)"
+              echo "=== E2E_TOKEN loaded (${#E2E_TOKEN} chars) ==="
 
-          echo "=== Cloning repo ==="
-          apt-get update -qq && apt-get install -y -qq git > /dev/null
-          git clone https://github.com/terzo-ai/nebula-e2e-tests.git /app
-          cd /app
+              echo "=== Installing system deps ==="
+              apt-get update -qq && apt-get install -y -qq git > /dev/null
+              pip install uv --quiet
 
-          echo "=== Installing dependencies ==="
-          uv sync
+              echo "=== Cloning repo ==="
+              git clone --depth=1 https://github.com/terzo-ai/nebula-e2e-tests.git /app
+              cd /app
 
-          echo "=== Run ID: $(date -u +%Y%m%d-%H%M%S) ==="
-          echo "=== Running smoke tests ==="
-          uv run pytest tests/api/test_smoke.py -v
+              echo "=== Installing Python deps ==="
+              uv sync
 
-          echo "=== Running pipeline tests ==="
-          uv run pytest tests/api/ -v --timeout=900
-        env:
-        - name: E2E_BASE_URL
-          value: "https://mafia.terzocloud.com"
-        - name: E2E_TENANT_ID
-          value: "1000012"
-        # Fixtures from Azure File Share (optional — falls back to in-memory)
-        # - name: E2E_FIXTURES_DIR
-        #   value: "/mnt/e2e-fixtures"
-        # volumeMounts:
-        # - name: test-fixtures
-        #   mountPath: /mnt/e2e-fixtures
-        #   readOnly: true
-      # volumes:
-      # - name: test-fixtures
-      #   azureFile:
-      #     shareName: fs-terzo-ai-dev
-      #     secretName: azure-storage-secret
-      #     readOnly: true
-      restartPolicy: Never
+              echo "=== Run started at $(date -u +%Y%m%dT%H%M%SZ) ==="
+              echo "=== Running marker=e2e (bulk-upload + UI upload) ==="
+              # Don't abort-on-fail around pytest — we always want the
+              # Slack DM to fire afterwards, even on test failure.
+              set +e
+              uv run pytest tests/api/ -v -m e2e --timeout=1800
+              PYTEST_EXIT=$?
+              set -e
+
+              # ----------------------------------------------------------
+              # Always-on DM to paventhan@terzocloud.com.
+              # Runs AFTER pytest regardless of outcome. Not gated by
+              # E2E_SLACK_NOTIFY — the DM fires whenever a bot token is
+              # mounted. Using stdlib urllib so we don't need another pip.
+              # ----------------------------------------------------------
+              echo "=== Sending Slack DM (pytest exit=$PYTEST_EXIT) ==="
+              python3 <<'PY' || echo "Slack DM failed — non-fatal"
+              import json, os, sys, urllib.parse, urllib.request, urllib.error
+
+              token = os.environ.get("E2E_SLACK_BOT_TOKEN", "")
+              if not token:
+                  print("E2E_SLACK_BOT_TOKEN unset — skipping DM")
+                  sys.exit(0)
+
+              try:
+                  with open("/app/reports/slack-dm-payload.json") as f:
+                      payload = json.load(f)
+              except FileNotFoundError:
+                  print("no slack-dm-payload.json — skipping DM")
+                  sys.exit(0)
+
+              email = payload.get("recipient_email") or "paventhan@terzocloud.com"
+              text = payload.get("text") or "E2E run complete"
+
+              # 1. Resolve email → Slack user_id
+              lookup = urllib.request.Request(
+                  "https://slack.com/api/users.lookupByEmail?"
+                  + urllib.parse.urlencode({"email": email}),
+                  headers={"Authorization": f"Bearer {token}"},
+              )
+              try:
+                  with urllib.request.urlopen(lookup, timeout=10) as resp:
+                      data = json.load(resp)
+              except (urllib.error.URLError, TimeoutError) as e:
+                  print(f"users.lookupByEmail network error: {e}")
+                  sys.exit(1)
+              if not data.get("ok"):
+                  print(f"users.lookupByEmail error: {data.get('error')}")
+                  sys.exit(1)
+              user_id = data["user"]["id"]
+              print(f"resolved {email} -> {user_id}")
+
+              # 2. Post DM
+              body = json.dumps({"channel": user_id, "text": text}).encode("utf-8")
+              post = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=body,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json; charset=utf-8",
+                  },
+                  method="POST",
+              )
+              with urllib.request.urlopen(post, timeout=10) as resp:
+                  result = json.load(resp)
+              if result.get("ok"):
+                  print(f"DM sent ts={result.get('ts')}")
+              else:
+                  print(f"chat.postMessage error: {result.get('error')}")
+                  sys.exit(1)
+              PY
+
+              exit $PYTEST_EXIT
+            env:
+            # Gateway + tenant
+            - name: E2E_BASE_URL
+              value: "https://terzoai-gateway-dev.terzocloud.com"
+            - name: E2E_TENANT_ID
+              value: "1000012"
+            # Event Hub: comma-separated list of the 5 child hubs under
+            # the terzo-ai-nebula-events-dev namespace.
+            - name: E2E_EVENT_HUB_NAME
+              value: "terzo-ai-contract-document-events,terzo-ai-contract-metadata-events,terzo-ai-contract-outbox-events,terzo-ai-ocr-events,terzo-ai-platforms-file-ingest-events"
+            # Event Hub + fixtures/uploads + UI session + Slack come
+            # from a single K8s Secret. Create/update with:
+            #   kubectl create secret generic nebula-e2e-secrets \
+            #     -n terzo-squad \
+            #     --from-literal=event-hub-connection-string='<EH SAS>' \
+            #     --from-literal=fixtures-connection-string='<storage conn string>' \
+            #     --from-literal=analytics-xsrf-token='<X-XSRF-TOKEN value>' \
+            #     --from-literal=slack-bot-token='xoxb-...' \
+            #     --dry-run=client -o yaml | kubectl apply -f -
+            # The contract-drive endpoint uses CSRF double-submit (cookie
+            # value = XSRF token itself), so no separate cookie secret.
+            # Any missing key is `optional: true`, so the test degrades
+            # gracefully (records SKIPPED rows) rather than erroring out.
+            - name: E2E_EVENT_HUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: nebula-e2e-secrets
+                  key: event-hub-connection-string
+                  optional: true
+            - name: E2E_FIXTURES_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: nebula-e2e-secrets
+                  key: fixtures-connection-string
+                  optional: true
+            - name: E2E_ANALYTICS_XSRF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nebula-e2e-secrets
+                  key: analytics-xsrf-token
+                  optional: true
+            # Slack bot token: used by the post-pytest DM step in the
+            # main container script. Optional — when unset, the DM is
+            # silently skipped (run still succeeds).
+            - name: E2E_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nebula-e2e-secrets
+                  key: slack-bot-token
+                  optional: true
+            volumeMounts:
+            - name: shared
+              mountPath: /shared
+              readOnly: true
+          volumes:
+          - name: shared
+            emptyDir: {}
+          restartPolicy: Never

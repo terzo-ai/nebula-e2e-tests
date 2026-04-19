@@ -1,13 +1,18 @@
 """E2E test: single presigned upload → full pipeline through EXTRACTION_QUEUED.
 
 Target: mafia.terzocloud.com (Dev environment), tenant 1000012.
+
+DISABLED — only the bulk-upload endpoint is under E2E coverage right now.
+Remove the module-level `pytestmark` below to re-enable.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from lib.api_clients.document_service import DocumentServiceClient
+import pytest
+
+from lib.api_clients.file_ingestion import FileIngestionClient
 from lib.config import E2EConfig
 from lib.fixtures import FixtureFile
 from lib.polling import PollTimeoutError, poll_until
@@ -17,9 +22,13 @@ from lib.run_context import RunContext
 if TYPE_CHECKING:
     from lib.event_hub import EventHubListener
 
+pytestmark = pytest.mark.skip(
+    reason="Presigned-upload endpoint disabled — only bulk-upload is under E2E coverage"
+)
+
 
 async def test_presigned_upload_reaches_extraction_queued(
-    doc_client: DocumentServiceClient,
+    doc_client: FileIngestionClient,
     config: E2EConfig,
     test_files: list[FixtureFile],
     run_ctx: RunContext,
@@ -30,7 +39,7 @@ async def test_presigned_upload_reaches_extraction_queued(
     through the full pipeline: CONFIRMED → OCR_QUEUED → OCR_COMPLETED → EXTRACTION_QUEUED.
     """
     test_file = test_files[0]
-    filename = run_ctx.tag_filename(test_file.name, index=0)
+    filename = test_file.name
 
     # Step 1: Initiate presigned upload
     upload = await doc_client.initiate_upload(
@@ -46,7 +55,7 @@ async def test_presigned_upload_reaches_extraction_queued(
     pipeline_report.add_document(ufid, filename)
 
     if event_listener:
-        event_listener.watch(ufid)
+        await event_listener.watch(ufid)
 
     pipeline_report.record_step(
         ufid, "UI / Drive",
@@ -59,8 +68,8 @@ async def test_presigned_upload_reaches_extraction_queued(
     await doc_client.upload_to_sas(upload.upload_url, test_file.content)
 
     pipeline_report.record_step(
-        ufid, "Document Service",
-        "Document Service \u2014 Ingest",
+        ufid, "File Ingestion Service",
+        "File Ingestion Service \u2014 Ingest",
         StepStatus.PASS,
         details=(
             "Blob storage upload \u2713\n"
@@ -115,8 +124,8 @@ async def test_presigned_upload_reaches_extraction_queued(
         )
     except PollTimeoutError:
         pipeline_report.record_step(
-            ufid, "Document Service",
-            "Document Service \u2014 State Update",
+            ufid, "File Ingestion Service",
+            "File Ingestion Service \u2014 State Update",
             StepStatus.FAIL,
             details="\u00d7 Timed out waiting for OCR_COMPLETED",
         )
@@ -138,8 +147,8 @@ async def test_presigned_upload_reaches_extraction_queued(
     )
 
     pipeline_report.record_step(
-        ufid, "Document Service",
-        "Document Service \u2014 State Update",
+        ufid, "File Ingestion Service",
+        "File Ingestion Service \u2014 State Update",
         StepStatus.PASS,
         details=f"processing_state \u2192 EXTRACTION_QUEUED \u2713\n" + "\n".join(artifact_details),
     )
@@ -180,10 +189,10 @@ async def test_presigned_upload_reaches_extraction_queued(
             if trace and trace.steps:
                 trace.steps[-1].events = events
 
-        if event_listener.has_event(ufid, "ocr.queued"):
-            assert event_listener.has_event(ufid, "ocr.queued"), "Missing ocr.queued event"
-        if event_listener.has_event(ufid, "ocr.completed"):
-            assert event_listener.has_event(ufid, "ocr.completed"), "Missing ocr.completed event"
+        if event_listener.has_event(ufid, "OCR_QUEUED"):
+            assert event_listener.has_event(ufid, "OCR_QUEUED"), "Missing OCR_QUEUED event"
+        if event_listener.has_event(ufid, "OCR_COMPLETED"):
+            assert event_listener.has_event(ufid, "OCR_COMPLETED"), "Missing OCR_COMPLETED event"
 
         dupes = event_listener.find_duplicates()
         assert not dupes, f"Duplicate events detected: {dupes}"

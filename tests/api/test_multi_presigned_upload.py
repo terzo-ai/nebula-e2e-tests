@@ -2,6 +2,9 @@
 
 Uploads all test files from the configured source (Azure Blob / local dir / in-memory).
 If fewer test files than file_count, the first file is reused with different names.
+
+DISABLED — only the bulk-upload endpoint is under E2E coverage right now.
+Remove the module-level `pytestmark` below to re-enable.
 """
 
 from __future__ import annotations
@@ -11,19 +14,23 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from lib.api_clients.document_service import DocumentServiceClient
+from lib.api_clients.file_ingestion import FileIngestionClient
 from lib.config import E2EConfig
 from lib.fixtures import FixtureFile
 from lib.polling import PollTimeoutError, poll_until
 from lib.report import PipelineReport, StepStatus
 from lib.run_context import RunContext
 
+pytestmark = pytest.mark.skip(
+    reason="Presigned-upload endpoint disabled — only bulk-upload is under E2E coverage"
+)
+
 if TYPE_CHECKING:
     from lib.event_hub import EventHubListener
 
 
 async def _upload_single_file(
-    doc_client: DocumentServiceClient,
+    doc_client: FileIngestionClient,
     filename: str,
     file_bytes: bytes,
     content_type: str = "application/pdf",
@@ -41,7 +48,7 @@ async def _upload_single_file(
 
 @pytest.mark.parametrize("file_count", [3, 5, 10])
 async def test_multi_presigned_upload_all_reach_extraction_queued(
-    doc_client: DocumentServiceClient,
+    doc_client: FileIngestionClient,
     config: E2EConfig,
     test_files: list[FixtureFile],
     run_ctx: RunContext,
@@ -60,7 +67,7 @@ async def test_multi_presigned_upload_all_reach_extraction_queued(
         for i in range(file_count):
             # Cycle through available test files, reuse if fewer than file_count
             test_file = test_files[i % len(test_files)]
-            filename = run_ctx.tag_filename(test_file.name, index=i)
+            filename = test_file.name
             tasks.append(
                 tg.create_task(
                     _upload_single_file(
@@ -76,16 +83,16 @@ async def test_multi_presigned_upload_all_reach_extraction_queued(
     # Register documents in report and event listener
     for i, ufid in enumerate(ufids):
         test_file = test_files[i % len(test_files)]
-        filename = run_ctx.tag_filename(test_file.name, index=i)
+        filename = test_file.name
         pipeline_report.add_document(ufid, filename)
         pipeline_report.record_step(
-            ufid, "Document Service",
+            ufid, "File Ingestion Service",
             "Upload + Confirm",
             StepStatus.PASS,
             details="Presigned upload \u2192 Confirmed \u2713",
         )
         if event_listener:
-            event_listener.watch(ufid)
+            await event_listener.watch(ufid)
 
     # Step 2: Poll all documents until EXTRACTION_QUEUED (concurrently)
     results: list = []

@@ -7,3 +7,4 @@ allure-results/
 *.egg-info/
 dist/
 reports/
+.claude/

@@ -18,13 +18,6 @@ class RunContext:
     run_id: str = field(default_factory=lambda: _generate_run_id())
     uploaded_ufids: list[str] = field(default_factory=list)
 
-    def tag_filename(self, original_name: str, index: int = 0) -> str:
-        """Prefix a filename with the run ID for traceability.
-
-        Example: 'contract.pdf' → 'e2e-20260413-030000-a1b2c3-0-contract.pdf'
-        """
-        return f"{self.run_id}-{index}-{original_name}"
-
     def register(self, ufid: str) -> None:
         """Track a document created in this run."""
         self.uploaded_ufids.append(ufid)

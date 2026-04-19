@@ -11,6 +11,8 @@ dependencies = [
     "pydantic-settings>=2.7",
     "allure-pytest>=2.13",
     "azure-eventhub>=5.11",
+    "azure-storage-blob>=12.19",
+    "reportlab>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -20,10 +22,32 @@ ui = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-timeout = 900
+# Pin async fixtures AND tests to the same session-scoped event loop so
+# session-scoped resources (notably the `event_listener` fixture with its
+# `asyncio.Event` and background receive tasks) aren't created on one
+# loop and consumed on another. Without this, the second test to touch
+# the listener hits "asyncio.locks.Event is bound to a different event
+# loop" at `_new_event.wait()`.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+timeout = 600
 markers = [
     "slow: marks tests that take >60s (OCR processing)",
+    # Primary tag: every E2E test carries this so `-m e2e` runs the whole suite.
+    "e2e: end-to-end pipeline tests",
+    # Per-endpoint tags for targeting a single test case from CI.
+    "bulk_upload: bulk-upload gateway endpoint pipeline test",
+    "ui_upload: UI contract-drive file upload endpoint pipeline test",
+    "presigned_upload: presigned-URL direct upload (initiate → PUT → file-uploaded) pipeline test",
 ]
+
+# Live log capture — surfaces logger.info/exception from lib.event_hub
+# and friends so Event Hub listener startup / capture events / errors
+# are visible in the GitHub Actions run log.
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+log_cli_date_format = "%H:%M:%S"
 
 [tool.uv]
 dev-dependencies = [

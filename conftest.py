@@ -12,6 +12,7 @@ from lib.auth import (
     AuthError,
     fetch_access_token,
     fetch_analytics_session_cookie,
+    is_token_expired,
 )
 from lib.config import E2EConfig
 from lib.fixtures import FixtureFile, load_test_files
@@ -36,11 +37,18 @@ async def access_token(config: E2EConfig, pipeline_report: PipelineReport) -> st
     """Get bearer token for Nebula gateway requests.
 
     Preference order:
-      1. E2E_TOKEN env var (manual override) → `config.token`
+      1. E2E_TOKEN env var (manual override) → `config.token`, if it's
+         still valid. A JWT whose `exp` has passed is discarded and the
+         two-step flow runs instead.
       2. Two-step auth flow: Analytics login → auth-service exchange
     """
     if config.token:
-        return config.token
+        if not is_token_expired(config.token):
+            return config.token
+        print(
+            "\n  E2E_TOKEN is expired — falling back to auth-service "
+            f"at {config.auth_service_url}"
+        )
     try:
         return await fetch_access_token(config)
     except Exception as e:
@@ -201,18 +209,45 @@ def pipeline_report(config: E2EConfig, run_ctx: RunContext):
         path = report.save(output_dir / f"pipeline-{run_ctx.run_id}.html")
         print(f"\n  Pipeline report: {path}")
 
-        # Write Slack payload JSON for the GitHub Action notification step.
+        # Write Slack payload JSON files for the GitHub Action notification
+        # steps. Two messages are produced:
+        #
+        #   * `slack-payload.json` — the compact main-channel summary
+        #     (Block Kit blocks + a fallback `text` for push notifications).
+        #   * `slack-thread-payload.json` — the per-stage breakdown. The
+        #     workflow fills in `channel` + `thread_ts` from the main
+        #     message's response before posting.
+        #
         # E2E_SLACK_CHANNEL_ID env var (wired from a GitHub repo/env variable)
         # overrides the default when set.
         slack_channel_id = os.environ.get("E2E_SLACK_CHANNEL_ID", "").strip() or "C0ARRGXRY5P"
         import json as _json
+
+        from lib.slack_report import (
+            build_fallback_text,
+            build_main_blocks,
+            build_thread_blocks,
+            build_thread_fallback_text,
+        )
+
         slack_payload = {
             "channel": slack_channel_id,
-            "text": report.slack_summary(),
+            "text": build_fallback_text(report),
+            "blocks": build_main_blocks(report),
         }
         payload_path = output_dir / "slack-payload.json"
         payload_path.write_text(_json.dumps(slack_payload), encoding="utf-8")
         print(f"  Slack payload: {payload_path}")
+
+        thread_payload = {
+            "text": build_thread_fallback_text(report),
+            "blocks": build_thread_blocks(report),
+        }
+        thread_payload_path = output_dir / "slack-thread-payload.json"
+        thread_payload_path.write_text(
+            _json.dumps(thread_payload), encoding="utf-8"
+        )
+        print(f"  Slack thread payload: {thread_payload_path}")
 
         # Always-on DM summary for paventhan@terzocloud.com. The workflow
         # step that sends this is NOT gated by E2E_SLACK_NOTIFY — so

@@ -43,12 +43,11 @@ jobs:
         env:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}
-          # E2E_TOKEN intentionally not referenced here. Scheduled runs
-          # live in the AKS CronJob where an init container auto-mints
-          # the bearer. GitHub Actions runs are demo / manual-dispatch
-          # only and will fail at auth (auth-service is VPC-internal);
-          # use the K8s CronJob for real coverage.
-          # Two-step auth flow (runs when E2E_TOKEN is empty):
+          # Manual bearer override. Used if set and not expired; the
+          # access_token fixture decodes the JWT `exp` claim and falls
+          # through to the two-step auth flow when the token is stale.
+          E2E_TOKEN: ${{ secrets.E2E_TOKEN }}
+          # Two-step auth flow (runs when E2E_TOKEN is empty or expired):
           #   Step 1 — Analytics login
           E2E_ANALYTICS_EMAIL: ${{ vars.E2E_ANALYTICS_EMAIL }}
           E2E_ANALYTICS_PASSWORD: ${{ secrets.E2E_ANALYTICS_PASSWORD }}
@@ -86,6 +85,36 @@ jobs:
           method: chat.postMessage
           token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
           payload-file-path: reports/slack-payload.json
+          errors: true
+
+      # Per-scenario stage breakdown, posted as a thread reply to the
+      # main summary message. Keeps the main channel scannable while
+      # preserving the full stage detail for whoever needs to dig in.
+      - name: Build threaded stage-breakdown payload
+        id: thread_build
+        if: always() && steps.slack.outputs.ts != '' && hashFiles('reports/slack-thread-payload.json') != ''
+        env:
+          CHANNEL_ID: ${{ steps.slack.outputs.channel_id }}
+          THREAD_TS: ${{ steps.slack.outputs.ts }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          with open("reports/slack-thread-payload.json") as f:
+              payload = json.load(f)
+          payload["channel"] = os.environ["CHANNEL_ID"]
+          payload["thread_ts"] = os.environ["THREAD_TS"]
+          with open("reports/slack-thread-final.json", "w") as f:
+              json.dump(payload, f)
+          PY
+        shell: bash
+
+      - name: Post stage-breakdown thread reply
+        if: always() && steps.thread_build.outcome == 'success' && hashFiles('reports/slack-thread-final.json') != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.E2E_SLACK_BOT_TOKEN }}
+          payload-file-path: reports/slack-thread-final.json
           errors: true
 
       - name: Resolve pipeline report path

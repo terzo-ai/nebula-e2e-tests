@@ -64,7 +64,11 @@ class PipelineStage:
     timeout_s: float
 
 
-PIPELINE_STAGES: list[PipelineStage] = [
+# Tuple (not list) so the module-level default exposed via
+# ``skip_all_stages(stages=PIPELINE_STAGES)`` and
+# ``run_pipeline_stages(stages=PIPELINE_STAGES)`` cannot be mutated
+# in-place by a caller who thought they were working on a local copy.
+PIPELINE_STAGES: tuple[PipelineStage, ...] = (
     PipelineStage(
         service="Event Hub",
         description="Event Hub listener received first event for ufid",
@@ -101,7 +105,7 @@ PIPELINE_STAGES: list[PipelineStage] = [
         action="EXTRACTION_COMPLETED",
         timeout_s=STAGE_TIMEOUT_S,
     ),
-]
+)
 
 
 def skip_all_stages(

@@ -59,44 +59,6 @@ def is_token_expired(token: str, leeway_seconds: int = 60) -> bool:
     return time.time() + leeway_seconds >= exp
 
 
-async def fetch_analytics_access_token(config: E2EConfig) -> str:
-    """Step 1: log in to Analytics and return the ACCESS_TOKEN.
-
-    Uses the `analytics_*` config fields (email, password, xsrf_token, cookie).
-    """
-    if not (config.analytics_email and config.analytics_password):
-        raise AuthError(
-            "analytics_email / analytics_password must be set (E2E_ANALYTICS_EMAIL / "
-            "E2E_ANALYTICS_PASSWORD) to run the two-step auth flow"
-        )
-    if not (config.analytics_xsrf_token and config.analytics_cookie):
-        raise AuthError(
-            "analytics_xsrf_token / analytics_cookie must be set "
-            "(E2E_ANALYTICS_XSRF_TOKEN / E2E_ANALYTICS_COOKIE)"
-        )
-
-    url = f"{config.analytics_base_url.rstrip('/')}/_/api/auth/login/password"
-    headers = {
-        "Origin": config.analytics_base_url,
-        "Referer": f"{config.analytics_base_url.rstrip('/')}/login",
-        "Content-Type": "application/json",
-        "X-XSRF-TOKEN": config.analytics_xsrf_token,
-        "Cookie": config.analytics_cookie,
-    }
-    body = {
-        "email": config.analytics_email,
-        "password": config.analytics_password,
-        "type": "b",
-    }
-
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(url, headers=headers, json=body)
-        if resp.status_code >= 400:
-            raise AuthError(_format_http_error("Analytics login", url, resp))
-
-    return _extract_token_from_http_response(resp, step="Analytics login")
-
-
 async def fetch_auth_service_bearer(config: E2EConfig, analytics_access_token: str) -> str:
     """Step 2: exchange the Analytics ACCESS_TOKEN for a Nebula gateway bearer."""
     url = f"{config.auth_service_url.rstrip('/')}/auth/token"

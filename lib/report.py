@@ -9,8 +9,10 @@ execution, then renders a self-contained HTML report with:
   * Captured log stream (collapsible, color-coded by level)
   * Errors banner
   * Pipeline flow graph per document:
-      File Ingestion Service (uploaded/failed) → Event Hub → OCR → AI Extraction → Ingestion
-    Stages downstream of File Ingestion Service derive their status from Event Hub events.
+      File Ingestion → OCR → Auto Extraction
+    Each flow node aggregates the underlying CloudEvents stages (e.g. OCR
+    aggregates ``ocr.queued`` + ``ocr.completed``). Status is derived from
+    the Event Hub events captured during the run.
 """
 
 from __future__ import annotations

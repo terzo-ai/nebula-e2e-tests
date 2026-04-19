@@ -43,12 +43,24 @@ class CapturedEvent:
 
 
 class EventTimeoutError(Exception):
-    def __init__(self, ufid: str, action: str, timeout: float):
+    """Raised when ``wait_for_event`` / ``wait_for_event_type`` time out.
+
+    ``matcher`` is the value we were waiting for — a ``data.action`` string
+    (e.g. ``OCR_QUEUED``) when called via :meth:`wait_for_event`, or a
+    CloudEvents ``type`` (e.g. ``com.terzo.document.ocr.queued``) when
+    called via :meth:`wait_for_event_type`.
+    """
+
+    def __init__(self, ufid: str, matcher: str, timeout: float):
         self.ufid = ufid
-        self.action = action
+        self.matcher = matcher
+        # Kept for backward compatibility with any caller that still reads
+        # ``.action`` on a timeout — all existing callers only format via
+        # ``str(e)`` so this alias is invisible to them.
+        self.action = matcher
         self.timeout = timeout
         super().__init__(
-            f"Timed out waiting for action '{action}' "
+            f"Timed out waiting for {matcher!r} "
             f"for document {ufid} after {timeout}s"
         )
 

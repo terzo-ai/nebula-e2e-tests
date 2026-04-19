@@ -41,13 +41,11 @@ jobs:
         env:
           E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
           E2E_TENANT_ID: ${{ vars.E2E_TENANT_ID }}
-          # Manual bearer override. GitHub-hosted runners can't reach
-          # auth-service-dev1 (a public-facing proxy redirects HTTP →
-          # HTTPS and responds 405), so Python's auto-mint flow does
-          # not work from GitHub Actions. Keep E2E_TOKEN set here.
-          # The K8s CronJob path auto-mints per run via its init
-          # container and does not need this secret.
-          E2E_TOKEN: ${{ secrets.E2E_TOKEN }}
+          # E2E_TOKEN intentionally not referenced here. Scheduled runs
+          # live in the AKS CronJob where an init container auto-mints
+          # the bearer. GitHub Actions runs are demo / manual-dispatch
+          # only and will fail at auth (auth-service is VPC-internal);
+          # use the K8s CronJob for real coverage.
           # Two-step auth flow (runs when E2E_TOKEN is empty):
           #   Step 1 — Analytics login
           E2E_ANALYTICS_EMAIL: ${{ vars.E2E_ANALYTICS_EMAIL }}
